@@ -174,3 +174,71 @@ None of these block a Pass; the architect may choose to schedule any of them for
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — All four previously-open findings (1 Major, 2 Minor, 1 Question) are confirmed resolved by direct code/spec inspection and by 4 new targeted tests. The full suite (50 tests) passes and the typecheck is clean. No new issues were found during this re-review. The three carried-forward Observations are non-blocking and were already known. This change is ready for `/verify` (interactive testing, including the still-outstanding manual cross-machine loopback check) and, following that, `doc-writer` and archival.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-13
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of Gatoway core (branch `gatoway-core-foundation`, HEAD `a8acacc`) — starting it as a standalone process the way a real operator would, then exercising loopback binding, authentication, and logging live.
+**Prepared for:** Technical Architect
+
+## Summary
+
+Interactive testing surfaced one new **Critical**, code-level finding that neither the automated test suite nor either static review pass caught: Gatoway core silently fails to start at all when launched via its own documented standalone entry point (`npm run dev`, and by extension `node dist/index.js`), in this project's actual real-world path. It exits cleanly with no error, no listeners, and no log output whatsoever. This blocks further live verification of the running system (loopback binding, TCP/WS auth, logging) via the intended launch path, so the remaining planned checks are deferred until it's fixed.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-005 | Critical | `gatoway-core/src/index.ts:119-127` | The standalone-invocation guard's string-equality check between `import.meta.url` and `file://${process.argv[1]}` fails whenever the path needs URL-encoding (e.g. contains spaces), so Gatoway core silently no-ops instead of starting | Open |
+
+## Issue Detail
+
+### QA-005 · Critical · `gatoway-core/src/index.ts:119-127`
+
+**What:** The direct-invocation guard:
+```ts
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  import.meta.url === `file://${process.argv[1]}`;
+
+if (invokedDirectly) {
+  startGatowayCore().catch((err) => { ... });
+}
+```
+compares `import.meta.url` (a properly percent-encoded `file://` URL) against a naively concatenated string that is never encoded.
+
+**Scenario:** Any path containing characters that require URL-encoding in a `file://` URL — most commonly spaces — causes the two sides of the comparison to never match, so `invokedDirectly` evaluates `false` and `startGatowayCore()` is never invoked when the module is executed directly (e.g. via `npm run dev`, `tsx src/index.ts`, or `node dist/index.js`).
+
+**Evidence:** Reproduced live in this project's actual directory (`/path with spaces/Gatoway/gatoway-core`, whose ancestor path contains spaces):
+```
+argv1= /path with spaces/Gatoway/gatoway-core/debugcheck.ts
+metaurl= file:///path%20with%20spaces/Gatoway/gatoway-core/debugcheck.ts
+constructed= file:///path with spaces/Gatoway/gatoway-core/debugcheck.ts
+match= false
+```
+Running `npm run dev` for real in this project produced no listening sockets (confirmed via `lsof -nP -iTCP -sTCP:LISTEN`), no log file in the configured log directory (confirmed with the user directly — the directory remained empty), and no output of any kind on stdout/stderr. The process simply exited.
+
+**Impact:** `design.md`'s own Non-Goal states "this change only needs Gatoway core to be runnable as a standalone process" — that does not hold in this project's real environment. Anyone launching Gatoway core from a path containing a space (not an exotic condition — it's this project's actual location) gets a completely silent no-op instead of a running service, with no signal anywhere explaining why. This also puts the next delivery-sequence step at risk (the Stream Deck plugin spawning Gatoway core as a child process per `ARCHITECTURE.md` AD-1), if that plugin's install path has similar characters, and would be very difficult to diagnose from outside since nothing is logged or printed.
+
+**Suggested fix direction:** The outcome needed is a direct-invocation check robust to path-encoding differences (and ideally other normalization mismatches, e.g. symlinked temp directories) — not necessarily this exact comparison approach. The developer should pick the mechanism; the requirement is only that Gatoway core reliably starts — or, failing that, reliably reports a clear, visible error — when launched the way its own `package.json` scripts document.
+
+**Root-cause level:** Code. `design.md`'s Non-Goal about standalone runnability is correct as written; the implementation simply doesn't deliver it in the actual environment.
+
+## Verification Checks Not Yet Completed
+
+Blocked by QA-005 until Gatoway core can actually be started via its documented entry point:
+- Live confirmation (via `lsof`/`netstat`, observed together with the user) that the TCP and WebSocket listeners are bound only to `127.0.0.1` and unreachable from any other interface.
+- Live exercise of the manual TCP test client (`npm run manual:tcp-client`) — valid-token accept and invalid-token reject, observed together with the user.
+- Live exercise of the manual WebSocket test client (`npm run manual:ws-client`) — allowlisted-origin accept and non-allowlisted-origin reject, observed together with the user.
+- Live inspection of the rotating log file's actual content for a real session (connection lifecycle, auth outcomes, message detail).
+
+## Observations
+
+No new Observations from this session beyond those already carried forward from the prior two sessions (see above) — this session did not get far enough to reach them.
+
+## Review Verdict (this session)
+
+**Recommendation:** ❌ **Requires fixes** — QA-005 is Critical and blocks all further live verification via the standalone entry point. The main agent should route QA-005 to the `developer` subagent as a code-level fix; once fixed, resume `/verify` to complete the checks listed above.
