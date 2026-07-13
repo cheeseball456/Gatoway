@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig, type GatowayCoreConfig } from "./config.js";
 import { createLogger, type Logger } from "./logging/logger.js";
 import { generateToken, writeTokenFile } from "./auth/token.js";
@@ -116,11 +119,39 @@ export async function startGatowayCore(
 // as a standalone process, per design.md's Non-Goal that process spawning/supervision
 // belongs to the Stream Deck plugin's own change — this only needs to be runnable
 // stand-alone.
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === `file://${process.argv[1]}`;
+//
+// Comparing resolved filesystem paths (rather than building a `file://` URL by naive
+// string concatenation) avoids a false negative whenever the invoking path contains
+// characters that `file://` URLs percent-encode, e.g. spaces (QA-005): a naive
+// `file://${process.argv[1]}` never matches `import.meta.url` in that case, so
+// `invokedDirectly` was always false and this module silently never started when run
+// directly.
+//
+// Node resolves symlinks by default when computing a directly-executed entry module's
+// `import.meta.url` (`--preserve-symlinks-main` is off unless explicitly set), but does
+// *not* resolve symlinks in `process.argv[1]` itself. That mismatch is not exotic: on
+// macOS, `os.tmpdir()` returns `/tmp/...`, which is itself a symlink to `/private/tmp`,
+// so simply resolving `process.argv[1]` with `path.resolve` (no symlink resolution)
+// still fails to match whenever Gatoway core is launched from within a symlinked
+// directory. Resolving both sides through `fs.realpathSync` keeps the comparison
+// correct in that case too.
+function isInvokedDirectly(): boolean {
+  const entryArg = process.argv[1];
+  if (!entryArg) {
+    return false;
+  }
+  try {
+    const modulePath = fileURLToPath(import.meta.url);
+    const entryPath = realpathSync(path.resolve(entryArg));
+    return realpathSync(modulePath) === entryPath;
+  } catch {
+    // import.meta.url isn't a file:// URL, or argv[1]/this module's path can't be
+    // resolved on disk — definitely not a direct file invocation.
+    return false;
+  }
+}
 
-if (invokedDirectly) {
+if (isInvokedDirectly()) {
   startGatowayCore().catch((err) => {
     console.error("Gatoway core failed to start:", err);
     process.exitCode = 1;

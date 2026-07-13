@@ -5,6 +5,12 @@
       (implemented with `ws`, `pino` + `pino-roll`, and Node's built-in `crypto.randomUUID()` in place of an
       external UUID package — see developer summary for rationale)
 - [x] 1.3 Create the entry point exposing `startGatowayCore()` (per design D1)
+      (standalone-invocation guard originally compared `import.meta.url` against a naively
+      concatenated `file://` string, which never matched on paths needing URL-encoding, e.g.
+      spaces — silently no-oping `npm run dev`/`node dist/index.js`; fixed per QA-005 to compare
+      `fs.realpathSync`-resolved filesystem paths instead, also covering symlinked directories
+      such as macOS's `/tmp` → `/private/tmp`; regression-tested by spawning the real CLI entry
+      point in `test/integration/cliEntrypoint.test.ts`)
 
 ## 2. Message Protocol
 
