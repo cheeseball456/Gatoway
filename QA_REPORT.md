@@ -19,19 +19,22 @@ The most important thing the architect needs to know: **the initial TCP plugin r
 
 | ID | Severity | Location | Description | Status |
 |----|----------|----------|-------------|--------|
-| QA-001 | Major | `gatoway-core/src/connection/messageHandler.ts:76-221` | Initial TCP registration's capability manifest is never logged with payload; WebSocket registration is. Transport-asymmetric logging. | Open |
-| QA-002 | Minor | `gatoway-core/src/connection/tcpListener.ts:83-108`, `wsListener.ts:47-133` | Both listeners bind to `127.0.0.1` and `::1` via `Promise.all`; if IPv6 loopback is unavailable (e.g. some containerized/restricted environments), the entire core fails to start even though IPv4 loopback alone would satisfy the loopback-only requirement. | Open |
-| QA-003 | Minor | `gatoway-core/src/connection/messageHandler.ts:83-91` | A plugin's second/re-`register` message silently overwrites previously-declared `capabilities` with `[]` if the new message omits the field, since `Array.isArray(payload.capabilities) ? payload.capabilities : []` treats "absent" the same as "explicitly empty." | Open |
-| QA-004 | Question | `openspec/changes/gatoway-core-foundation/specs/connection-management/spec.md:32-34` vs. `connectionManager.ts:58-61` | The spec's "New connection starts unauthenticated" scenario says a new connection's state is set to `connected` then `authenticating`, "not yet treated as authenticated" — but the WebSocket `preAuthenticated` fast path (an intentional, well-justified design choice per `design.md` D5) walks straight through to `authenticated` inside `accept()`, so this scenario's literal wording never holds for WebSocket connections. | Open (needs confirmation whether the spec text should be amended) |
+| QA-001 | Major | `gatoway-core/src/connection/messageHandler.ts:76-221` | Initial TCP registration's capability manifest is never logged with payload; WebSocket registration is. Transport-asymmetric logging. | **Resolved (commit `a8acacc`)** |
+| QA-002 | Minor | `gatoway-core/src/connection/tcpListener.ts:83-108`, `wsListener.ts:47-133` | Both listeners bind to `127.0.0.1` and `::1` via `Promise.all`; if IPv6 loopback is unavailable (e.g. some containerized/restricted environments), the entire core fails to start even though IPv4 loopback alone would satisfy the loopback-only requirement. | **Resolved (commit `a8acacc`)** |
+| QA-003 | Minor | `gatoway-core/src/connection/messageHandler.ts:83-91` | A plugin's second/re-`register` message silently overwrites previously-declared `capabilities` with `[]` if the new message omits the field, since `Array.isArray(payload.capabilities) ? payload.capabilities : []` treats "absent" the same as "explicitly empty." | **Resolved (commit `a8acacc`)** |
+| QA-004 | Question | `openspec/changes/gatoway-core-foundation/specs/connection-management/spec.md:32-34` vs. `connectionManager.ts:58-61` | The spec's "New connection starts unauthenticated" scenario says a new connection's state is set to `connected` then `authenticating`, "not yet treated as authenticated" — but the WebSocket `preAuthenticated` fast path (an intentional, well-justified design choice per `design.md` D5) walks straight through to `authenticated` inside `accept()`, so this scenario's literal wording never holds for WebSocket connections. | **Resolved (commit `a8acacc`)** |
 
 **Status values:**
 - `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+- `Resolved (commit ...)` — fixed in a later commit, confirmed in a follow-up re-verification session (see below)
 
 ---
 
-## Issue Detail
+## Issue Detail (original findings, 2026-07-13 initial session)
 
-### QA-001 · Major · `gatoway-core/src/connection/messageHandler.ts`
+### QA-001 · Major (originally) · `gatoway-core/src/connection/messageHandler.ts`
 
 **What:** The capability manifest a plugin declares in its `register` message is not captured in the logs for the initial TCP registration, but is fully captured for the initial WebSocket registration.
 
@@ -55,9 +58,11 @@ The most important thing the architect needs to know: **the initial TCP plugin r
 
 **Suggested fix direction:** Ensure the initial registration event is logged with `pluginType` and `capabilities` regardless of which branch of `handleRegister` handles it (i.e., regardless of the connection's authentication-timing quirk), so TCP and WebSocket registrations produce equivalent log detail.
 
+**Resolution (verified 2026-07-13, commit `a8acacc`):** See Re-verification section below.
+
 ---
 
-### QA-002 · Minor · `gatoway-core/src/connection/tcpListener.ts`, `wsListener.ts`
+### QA-002 · Minor (originally) · `gatoway-core/src/connection/tcpListener.ts`, `wsListener.ts`
 
 **What:** Both the TCP and WebSocket listeners bind two separate server instances — one for `127.0.0.1`, one for `::1` — via `Promise.all`, which rejects (aborting `startGatowayCore()` entirely) if *either* bind fails.
 
@@ -69,9 +74,11 @@ The most important thing the architect needs to know: **the initial TCP plugin r
 
 **Suggested fix direction:** Decide (as an architecture/design question, not a code-only fix) whether a failure to bind `::1` specifically should be tolerated with a logged warning (falling back to IPv4-loopback-only) or should remain a hard failure; document whichever is chosen.
 
+**Resolution (verified 2026-07-13, commit `a8acacc`):** See Re-verification section below.
+
 ---
 
-### QA-003 · Minor · `gatoway-core/src/connection/messageHandler.ts:83-91`
+### QA-003 · Minor (originally) · `gatoway-core/src/connection/messageHandler.ts:83-91`
 
 **What:** `handleRegister` computes `capabilities` as `Array.isArray(payload.capabilities) ? payload.capabilities : []` on every `register` message, including a plugin's second/subsequent `register` call (the "already authenticated" branch).
 
@@ -81,9 +88,11 @@ The most important thing the architect needs to know: **the initial TCP plugin r
 
 **Impact:** If any later logic (e.g. profile-switching in a subsequent change) depends on `ConnectionRecord.capabilities`, a partial re-registration could silently erase a plugin's declared actions. Not currently exercised since no downstream feature reads `capabilities` yet, but worth confirming intended re-registration semantics before that logic is built.
 
+**Resolution (verified 2026-07-13, commit `a8acacc`):** See Re-verification section below.
+
 ---
 
-### QA-004 · Question · connection-management spec vs. `connectionManager.ts`
+### QA-004 · Question (originally) · connection-management spec vs. `connectionManager.ts`
 
 **What:** The `connection-management` capability spec's "New connection starts unauthenticated" scenario states a new connection's state is set to `connected` and then `authenticating`, "not yet treated as authenticated." The code's `preAuthenticated` fast path (used for WebSocket, per `design.md` D5's rationale that Origin-checking already happened at HTTP-upgrade time) transitions a WS connection through `connected -> authenticating -> authenticated` as one atomic step inside `ConnectionManager.accept()`, so externally a WS connection is *never* observably in a not-yet-authenticated state.
 
@@ -91,18 +100,20 @@ The most important thing the architect needs to know: **the initial TCP plugin r
 
 **Question for the requirements/spec owner:** Should the `connection-management` spec's scenario text be amended to explicitly carve out the WebSocket pre-authenticated case (mirroring `design.md`'s D3/D5 language), so the delta spec and the design intent stay in sync for future readers? The code correctly implements `design.md`'s decision; this is a spec-text completeness gap, not a code defect.
 
+**Resolution (verified 2026-07-13, commit `a8acacc`):** See Re-verification section below.
+
 ---
 
 ## Observations
 
-- `gatoway-core/src/connection/wsListener.ts:62-69` — the WebSocket `authentication_succeeded` log line omits the `origin` value that was actually matched, while the corresponding `authentication_failed` log (`wsListener.ts:91-98`) does include `origin`. Minor asymmetry; harmless but slightly reduces debuggability of which allowlist entry matched.
-- `gatoway-core/src/auth/token.ts:38-46` — on Windows, the token file is created via `writeFile` (default ACLs) and only restricted afterward via a separate `icacls` call, leaving a brief window where the file could be more widely readable than intended. The developer has already transparently disclosed (in `tasks.md` 4.2) that this path is implemented but unverifiable on the current (macOS) development machine — flagging here only so the architect is aware this specific claim still awaits a real Windows verification pass.
-- `gatoway-core/src/index.ts:59-71` — if `writeTokenFile` fails, Gatoway core logs loudly but continues starting up rather than aborting. This is a deliberate, well-commented trade-off (loopback-only binding still holds), not a defect, but it does mean a broken token file write silently weakens the one authentication control TCP connections rely on. Worth the architect's awareness, not a required fix.
-- Test coverage is good for the units reviewed (46 tests: envelope parsing, TCP/WS framing, token generation/permissions/constant-time comparison, Origin allowlist, connection state machine, message handler dispatch, log rotation, and real-socket TCP/WS integration tests asserting actual bound loopback addresses). `tasks.md` 6.4's live `netstat`/cross-machine verification was substituted with an assertion on bound socket addresses — a reasonable substitute for a sandboxed environment, but the architect may still want a one-time manual `netstat`/cross-machine check before this ships, per `ARCHITECTURE.md`'s own "For QA" handoff note ("Verify loopback-only binding actually rejects connections from another machine on the same network").
+- `gatoway-core/src/connection/wsListener.ts:62-69` — the WebSocket `authentication_succeeded` log line omits the `origin` value that was actually matched, while the corresponding `authentication_failed` log (`wsListener.ts:91-98`) does include `origin`. Minor asymmetry; harmless but slightly reduces debuggability of which allowlist entry matched. **Still stands** — unchanged by commit `a8acacc` (confirmed in re-verification below; not in scope of QA-001/002/003/004).
+- `gatoway-core/src/auth/token.ts:38-46` — on Windows, the token file is created via `writeFile` (default ACLs) and only restricted afterward via a separate `icacls` call, leaving a brief window where the file could be more widely readable than intended. The developer has already transparently disclosed (in `tasks.md` 4.2) that this path is implemented but unverifiable on the current (macOS) development machine — flagging here only so the architect is aware this specific claim still awaits a real Windows verification pass. **Still stands** — `token.ts` untouched by commit `a8acacc`.
+- `gatoway-core/src/index.ts:59-71` — if `writeTokenFile` fails, Gatoway core logs loudly but continues starting up rather than aborting. This is a deliberate, well-commented trade-off (loopback-only binding still holds), not a defect, but it does mean a broken token file write silently weakens the one authentication control TCP connections rely on. Worth the architect's awareness, not a required fix. **Still stands** — `index.ts` untouched by commit `a8acacc`.
+- Test coverage is good for the units reviewed (46 tests: envelope parsing, TCP/WS framing, token generation/permissions/constant-time comparison, Origin allowlist, connection state machine, message handler dispatch, log rotation, and real-socket TCP/WS integration tests asserting actual bound loopback addresses). `tasks.md` 6.4's live `netstat`/cross-machine verification was substituted with an assertion on bound socket addresses — a reasonable substitute for a sandboxed environment, but the architect may still want a one-time manual `netstat`/cross-machine check before this ships, per `ARCHITECTURE.md`'s own "For QA" handoff note ("Verify loopback-only binding actually rejects connections from another machine on the same network"). **Still relevant** — now simplified to a single-address bind, but the live manual cross-machine check has still not been performed; carries forward to `/verify`.
 
 ---
 
-## Testing Coverage Assessment
+## Testing Coverage Assessment (original session)
 
 The test suite (`gatoway-core/test/unit/*`, `gatoway-core/test/integration/*`) covers all four capabilities reasonably well at the unit and component-integration level:
 - **connection-management:** connection ID uniqueness, state-machine forward-only transitions, disconnect/removal — unit-tested directly against `ConnectionManager`.
@@ -110,12 +121,56 @@ The test suite (`gatoway-core/test/unit/*`, `gatoway-core/test/integration/*`) c
 - **message-protocol:** envelope encode/decode validation (malformed JSON, wrong types, missing fields), NDJSON framing edge cases (split chunks, `\r\n`, empty lines, multiple messages per chunk), WS single-frame framing.
 - **diagnostics-logging:** rotation-under-forced-size-threshold integration test confirms both rotation and retention-limit enforcement.
 
-Gaps: no test asserts on the *content* of log calls for the registration/capability-manifest path, which is exactly how QA-001 went unnoticed. No test covers the IPv6-bind-unavailable scenario (QA-002) or partial re-registration overwriting capabilities (QA-003). These would be reasonable additions once QA-001/QA-003 are resolved one way or another.
+Gaps identified at the time: no test asserted on the *content* of log calls for the registration/capability-manifest path (how QA-001 went unnoticed); no test covered the IPv6-bind-unavailable scenario (QA-002) or partial re-registration overwriting capabilities (QA-003). All three gaps are now closed — see re-verification session below.
 
 I did not run a live cross-machine connection attempt or a live `netstat`/`lsof` check (matching the developer's own disclosed limitation for a sandboxed environment) — this remains an outstanding manual verification item per `ARCHITECTURE.md`'s "For QA" section, to be picked up in `/verify`.
 
 ---
 
-## Review Verdict
+## Review Verdict (original session, superseded below)
 
 **Recommendation:** ⚠️ **Conditional pass** — One Major issue (QA-001) is open, but it is a logging/observability gap, not a functional or security defect: authentication, loopback binding, and the message protocol all behave correctly under test and manual code trace. The architect should decide whether QA-001 blocks this change or can be scheduled as an immediate follow-up fix before the Stream Deck plugin / Lightroom integration changes build on top of it, since native (TCP) registration logging is exactly what the next delivery-sequence step will depend on for debugging.
+
+---
+---
+
+# Re-verification Session — 2026-07-13
+
+**Reviewer:** QA Engineer
+**Scope:** Re-review of commit `a8acacc` ("gatoway-core-foundation: fix QA-001/002/003, document QA-004 fast path") against the original findings above, the amended `ARCHITECTURE.md` (v1.1), amended `design.md`/`proposal.md`/`tasks.md`, and the amended `connection-management` spec. Diff reviewed: `git diff 8739eec a8acacc`. Full test suite and typecheck re-run on the current working tree (branch `gatoway-core-foundation`, HEAD `a8acacc`).
+**Prepared for:** Technical Architect
+
+## Summary
+
+All four previously-open findings are resolved as claimed by the developer, and nothing else appears to have regressed. The fixes are precise, the amended `ARCHITECTURE.md`/`design.md`/spec text is internally consistent with the code, and each fix carries its own targeted new unit/integration test. The full suite (50 tests, up from 46) passes, and `tsc --noEmit` is clean. This change is ready to move forward; the three carry-forward Observations are non-blocking and unchanged from the original review.
+
+## Per-finding re-verification
+
+**QA-001 (Major) — Resolved.** `handleRegister`'s success path in `messageHandler.ts` now includes `pluginType` and `capabilities` on the `authentication_succeeded` log event (the first-registration/TCP-credential-validating path, lines ~143-152), and the pre-existing "already authenticated" `registered` event (lines ~96-105) now also includes `capabilities` alongside the `pluginType` it already logged. I traced both code paths directly: for TCP, `authentication_succeeded` now carries the full manifest; for WebSocket (`preAuthenticated`), the generic `message_received` block still logs the full payload as before, and the subsequent `registered` event now also carries `capabilities`. Both transports now produce equivalent registration detail, closing the asymmetry. Two new unit tests (`messageHandler.test.ts`) assert directly on the logged `pluginType`/`capabilities` fields for both the TCP and WebSocket paths — closing the exact test gap the original finding identified (no test previously asserted on log call content).
+
+**QA-002 (Minor, design-level) — Resolved.** `ARCHITECTURE.md` AD-4 is amended to v1.1, explicitly documenting the IPv4-only decision and its rationale (referencing this QA finding by ID). `design.md` D2 and the `connection-management` spec's "Loopback-Only Network Binding" requirement are updated to match. `tcpListener.ts` and `wsListener.ts` no longer construct two servers via `Promise.all` over `["127.0.0.1", "::1"]`; each now binds a single `net`/`http` server to a single `LOOPBACK_ADDRESS = "127.0.0.1"` constant, and `close()` is simplified accordingly (WebSocket's `close()` still correctly closes both the HTTP server and the `WebSocketServer`). I grepped the full `src/` tree for stale `::1`/dual-address references and found none — `config.ts`'s comments were also updated. The failure mode described in the original finding (entire startup aborting if IPv6 loopback bind fails) is eliminated by construction, since there is now only one bind to fail. The integration tests for both listeners were updated to assert a single `127.0.0.1` bind instead of two addresses, and still assert `0.0.0.0`/`::` are never bound. This is correctly flagged by the developer as a design-level fix (root cause: the original design required both addresses; the amendment revises AD-4 itself, not just the code) and was properly routed through an `ARCHITECTURE.md` amendment rather than a silent code-only patch.
+
+**QA-003 (Minor) — Resolved.** `handleRegister` now computes `capabilities` as `Array.isArray(payload.capabilities) ? payload.capabilities : (connection.capabilities ?? [])` — an omitted field now falls back to the connection's previously-recorded manifest (`undefined` on first registration, correctly defaulting to `[]` via `??`), while an explicit array (including an explicitly empty one) still replaces it, matching the intended "omission means unchanged, not cleared" semantics described in the fix. `ConnectionRecord.capabilities` is a plain optional field with no other mutation path, so this reads correctly. Two new unit tests confirm: (a) a re-registration omitting `capabilities` preserves the prior manifest, and (b) a re-registration with an explicit `[]` still clears it — both edge cases the original finding raised are now directly tested.
+
+**QA-004 (Question) — Resolved.** The `connection-management` spec's "Connection Lifecycle State Tracking" section now has two scenarios instead of one: "New connection starts unauthenticated" is narrowed to explicitly say "a new **TCP** connection," and a new "WebSocket connection takes a pre-authenticated fast path" scenario documents the atomic `connected -> authenticating -> authenticated` transition at accept time, explicitly cross-referencing `design.md` D5 and stating a WS connection is never externally observable in a not-yet-authenticated state. This text now accurately reflects `connectionManager.ts`'s actual behavior (`accept()`'s `preAuthenticated` branch) for both transports, closing the spec/code divergence the original finding raised. No code change was needed or made for this item, consistent with the original finding being a spec-completeness gap rather than a code defect.
+
+## Regression check
+
+- Ran `npm test` in `gatoway-core/`: **50/50 tests passing** across 11 test files (up from 46 in the original review; the 4 new tests are the QA-001/QA-003-targeted assertions described above). No failures, no skipped tests.
+- Ran `npx tsc --noEmit -p tsconfig.json`: **clean, zero errors.**
+- Reviewed the full diff (`git diff 8739eec a8acacc`) line by line rather than just the four touched areas; changes are confined to `ARCHITECTURE.md`, `config.ts` (comment-only), `messageHandler.ts`, `tcpListener.ts`, `wsListener.ts`, their integration/unit tests, and the OpenSpec `design.md`/`proposal.md`/`tasks.md`/spec files. No unrelated files (`token.ts`, `index.ts`, `originAllowlist.ts`, envelope/framing code, logger) were touched, and a grep confirmed no stale references to the old dual-address binding remain anywhere in `src/`.
+- No new Critical/Major/Minor issues were found during this re-review. The fixes are narrowly scoped to their target issues and do not introduce new logic paths beyond what's covered by the new tests.
+
+## Observations carried forward
+
+All three Observations from the original review still stand, unchanged, since none were in scope for this fix cycle:
+- `wsListener.ts` `authentication_succeeded` log still omits the matched `origin` (asymmetric with `authentication_failed`, which includes it).
+- `token.ts`'s Windows ACL-restriction-after-write window remains unverified on a real Windows machine (developer-disclosed limitation, unchanged).
+- `index.ts` still logs-and-continues rather than aborting if `writeTokenFile` fails at startup (deliberate trade-off, unchanged).
+- The live cross-machine/`netstat` manual verification of loopback-only binding (per `ARCHITECTURE.md`'s "For QA" note) has still not been performed in this sandboxed environment; it remains an open item for `/verify`, and now applies to a simpler single-address bind than before.
+
+None of these block a Pass; the architect may choose to schedule any of them for a future cycle.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — All four previously-open findings (1 Major, 2 Minor, 1 Question) are confirmed resolved by direct code/spec inspection and by 4 new targeted tests. The full suite (50 tests) passes and the typecheck is clean. No new issues were found during this re-review. The three carried-forward Observations are non-blocking and were already known. This change is ready for `/verify` (interactive testing, including the still-outstanding manual cross-machine loopback check) and, following that, `doc-writer` and archival.
