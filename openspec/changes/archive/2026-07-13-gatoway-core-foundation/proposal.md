@@ -9,9 +9,10 @@ Lightroom and xDesign integrations, focus/profile switching) depends on it exist
 ## What Changes
 
 - Introduce a new Gatoway core process (Node.js/TypeScript) with a TCP listener and a
-  WebSocket listener, both bound to loopback (`127.0.0.1`/`::1`) only — never all
+  WebSocket listener, both bound to IPv4 loopback (`127.0.0.1`) only — never all
   interfaces — so the core is unreachable from any other machine regardless of firewall
-  state.
+  state. (Amended per AD-4 v1.1/QA-002: IPv6 loopback `::1` is not required and is not
+  bound.)
 - Add connection lifecycle management: every accepted connection gets a unique
   connection ID, independent of plugin type, tracked from accept through authentication
   through disconnect. IDs are deliberately not keyed by plugin type so that supporting
