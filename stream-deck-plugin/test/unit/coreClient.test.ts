@@ -150,4 +150,67 @@ describe("CoreClient", () => {
     expect(scheduleReconnect).toHaveBeenCalled();
     expect(client.currentState).not.toBe("connected");
   });
+
+  it("logs a first-attempt token-read failure at 'info', not 'error', during the initial grace period (QA-007)", async () => {
+    const logger = fakeLogger();
+    const scheduleReconnect = vi.fn(() => () => undefined);
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => fakeSocket(),
+      readToken: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      scheduleReconnect,
+      now: () => 0,
+    });
+
+    client.start();
+    await flush();
+
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("failed to read Gatoway core's auth token file"),
+      expect.objectContaining({ event: "core_client_token_read_failed" }),
+    );
+  });
+
+  it("escalates a token-read failure to 'error' once the initial grace period has elapsed (QA-007)", async () => {
+    const logger = fakeLogger();
+    let now = 0;
+    let scheduledFn: (() => void) | undefined;
+    const scheduleReconnect = vi.fn((_delayMs: number, fn: () => void) => {
+      scheduledFn = fn;
+      return () => {
+        scheduledFn = undefined;
+      };
+    });
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => fakeSocket(),
+      readToken: async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      scheduleReconnect,
+      now: () => now,
+      initialGracePeriodMs: 5_000,
+    });
+
+    client.start();
+    await flush();
+    expect(logger.error).not.toHaveBeenCalled();
+
+    // Past the grace period: the same kind of failure is no longer benign-by-default.
+    now = 5_001;
+    scheduledFn?.();
+    await flush();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("failed to read Gatoway core's auth token file"),
+      expect.objectContaining({ event: "core_client_token_read_failed" }),
+    );
+  });
 });

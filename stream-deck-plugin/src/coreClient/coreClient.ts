@@ -8,6 +8,16 @@ import { encodeNdjsonLine, NdjsonLineDecoder } from "./protocol.js";
 /** The plugin type this Stream Deck plugin declares in its `register` message (design.md D3). */
 const PLUGIN_TYPE = "stream-deck";
 
+/**
+ * How long after `start()` a connection failure is treated as an expected part of
+ * Gatoway core's own startup (QA-007) rather than a genuine problem. The freshly-spawned
+ * Gatoway core process needs a little time to start Node, write its token file, and bind
+ * its TCP listener; the client's very first attempt(s) routinely race this on a cold
+ * start. Comfortably longer than that normal startup window, short enough that a real,
+ * ongoing failure still escalates promptly.
+ */
+const DEFAULT_INITIAL_GRACE_PERIOD_MS = 5_000;
+
 export type CoreClientState = "disconnected" | "connecting" | "authenticating" | "connected";
 
 export interface CoreClientOptions {
@@ -26,6 +36,10 @@ export interface CoreClientOptions {
   scheduleReconnect?: (delayMs: number, fn: () => void) => () => void;
   /** Overridable for tests: computes the backoff delay before reconnect attempt N. */
   backoffMs?: (attempt: number) => number;
+  /** Overridable for tests: the current time in epoch milliseconds. Defaults to `Date.now`. */
+  now?: () => number;
+  /** See `DEFAULT_INITIAL_GRACE_PERIOD_MS`. */
+  initialGracePeriodMs?: number;
 }
 
 function defaultConnect(port: number, host: string): Socket {
@@ -57,6 +71,8 @@ export class CoreClient {
   private readonly readToken: (path: string) => Promise<string>;
   private readonly scheduleReconnect: (delayMs: number, fn: () => void) => () => void;
   private readonly backoffMs: (attempt: number) => number;
+  private readonly now: () => number;
+  private readonly initialGracePeriodMs: number;
 
   private state: CoreClientState = "disconnected";
   private socket: Socket | undefined;
@@ -64,6 +80,7 @@ export class CoreClient {
   private stopped = false;
   private reconnectAttempt = 0;
   private cancelPendingReconnect: (() => void) | undefined;
+  private startedAt = 0;
 
   constructor(options: CoreClientOptions) {
     this.logger = options.logger;
@@ -74,6 +91,8 @@ export class CoreClient {
     this.readToken = options.readToken ?? defaultReadToken;
     this.scheduleReconnect = options.scheduleReconnect ?? defaultScheduleReconnect;
     this.backoffMs = options.backoffMs ?? ((attempt) => nextBackoffDelayMs(attempt));
+    this.now = options.now ?? Date.now;
+    this.initialGracePeriodMs = options.initialGracePeriodMs ?? DEFAULT_INITIAL_GRACE_PERIOD_MS;
   }
 
   /** The client's current connection state. */
@@ -84,6 +103,7 @@ export class CoreClient {
   /** Begins connecting (tasks.md 3.2). Safe to call once per client instance. */
   start(): void {
     this.stopped = false;
+    this.startedAt = this.now();
     void this.connectOnce();
   }
 
@@ -113,7 +133,7 @@ export class CoreClient {
     try {
       token = (await this.readToken(this.tokenFilePath)).trim();
     } catch (err) {
-      this.logger.error("failed to read Gatoway core's auth token file; will retry", {
+      this.logConnectFailure("failed to read Gatoway core's auth token file; will retry", {
         event: "core_client_token_read_failed",
         error: (err as Error).message,
       });
@@ -130,7 +150,7 @@ export class CoreClient {
     try {
       socket = this.connectFn(this.port, this.host);
     } catch (err) {
-      this.logger.error("failed to open a TCP connection to Gatoway core; will retry", {
+      this.logConnectFailure("failed to open a TCP connection to Gatoway core; will retry", {
         event: "core_client_connect_failed",
         error: (err as Error).message,
       });
@@ -214,6 +234,24 @@ export class CoreClient {
     this.state = "disconnected";
     // The 'close' handler schedules the actual retry once the socket finishes closing.
     this.socket?.destroy();
+  }
+
+  /**
+   * Logs a connection-attempt failure (token read or TCP connect) at a level that
+   * reflects how expected it is. During `initialGracePeriodMs` after `start()`, a failed
+   * attempt is normal - Gatoway core, just spawned, is still starting up - so it's logged
+   * at `info` rather than `error` (QA-007); once that grace period has elapsed, the same
+   * failure is escalated to `error` since it no longer has a benign explanation.
+   */
+  private logConnectFailure(message: string, details: Record<string, unknown>): void {
+    if (this.now() - this.startedAt < this.initialGracePeriodMs) {
+      this.logger.info(
+        `${message} (Gatoway core may still be starting up; not yet treated as an error)`,
+        details,
+      );
+      return;
+    }
+    this.logger.error(message, details);
   }
 
   private scheduleRetry(): void {
