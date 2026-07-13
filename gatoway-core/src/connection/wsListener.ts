@@ -7,8 +7,14 @@ import { encodeWsFrame } from "../protocol/wsFraming.js";
 import { handleRawMessage, type AuthenticateFn } from "./messageHandler.js";
 import type { ConnectionManager } from "./connectionManager.js";
 
-/** Loopback addresses the WebSocket listener binds to (design.md D2, connection-management spec). */
-const LOOPBACK_ADDRESSES = ["127.0.0.1", "::1"] as const;
+/**
+ * The loopback address the WebSocket listener binds to (design.md D2,
+ * connection-management spec's "Loopback-Only Network Binding"). IPv4 loopback only,
+ * per AD-4 v1.1 — IPv6 loopback (`::1`) is not required and is not bound (amended
+ * after QA-002: requiring both addresses failed startup entirely on hosts without
+ * IPv6 loopback available).
+ */
+const LOOPBACK_ADDRESS = "127.0.0.1";
 
 export interface WsListenerOptions {
   port: number;
@@ -19,7 +25,7 @@ export interface WsListenerOptions {
 }
 
 export interface WsListenerHandle {
-  /** The loopback addresses/ports actually bound, once each server has started listening. */
+  /** The loopback address/port actually bound, once the server has started listening. */
   addresses: { address: string; port: number }[];
   close: () => Promise<void>;
 }
@@ -37,9 +43,7 @@ function rejectUpgrade(socket: Duplex, statusLine: string): void {
 }
 
 /**
- * Starts the WebSocket listener bound only to loopback addresses. Binds two separate
- * `http.Server` instances — one per loopback address — sharing a single `noServer`
- * `WebSocketServer` to handle the upgrade handshake for both. Resolves only once every
+ * Starts the WebSocket listener bound only to IPv4 loopback. Resolves only once the
  * server has actually started listening, so callers (and tests) can rely on
  * `addresses` reflecting the real bound state rather than racing an in-flight
  * `listen()` call.
@@ -105,42 +109,38 @@ export function startWsListener(options: WsListenerOptions): Promise<WsListenerH
     });
   };
 
-  const listening = LOOPBACK_ADDRESSES.map(
-    (address) =>
-      new Promise<{ server: Server; address: string; port: number }>((resolve, reject) => {
-        const server = createServer((_req, res) => {
-          res.writeHead(426, { "Content-Type": "text/plain" });
-          res.end("Upgrade Required");
-        });
-        server.on("upgrade", handleUpgrade);
-        server.on("error", (err) => {
-          options.logger.error(
-            { event: "ws_listener_error", address, error: err.message },
-            "WebSocket listener error",
-          );
-          reject(err);
-        });
-        server.listen(options.port, address, () => {
-          const boundAddress = server.address();
-          if (boundAddress === null || typeof boundAddress === "string") {
-            reject(new Error(`unexpected WebSocket listener address for ${address}`));
-            return;
-          }
-          resolve({ server, address: boundAddress.address, port: boundAddress.port });
-        });
-      }),
+  const bound = new Promise<{ server: Server; address: string; port: number }>(
+    (resolve, reject) => {
+      const server = createServer((_req, res) => {
+        res.writeHead(426, { "Content-Type": "text/plain" });
+        res.end("Upgrade Required");
+      });
+      server.on("upgrade", handleUpgrade);
+      server.on("error", (err) => {
+        options.logger.error(
+          { event: "ws_listener_error", address: LOOPBACK_ADDRESS, error: err.message },
+          "WebSocket listener error",
+        );
+        reject(err);
+      });
+      server.listen(options.port, LOOPBACK_ADDRESS, () => {
+        const boundAddress = server.address();
+        if (boundAddress === null || typeof boundAddress === "string") {
+          reject(new Error(`unexpected WebSocket listener address for ${LOOPBACK_ADDRESS}`));
+          return;
+        }
+        resolve({ server, address: boundAddress.address, port: boundAddress.port });
+      });
+    },
   );
 
-  return Promise.all(listening).then((bound) => ({
-    addresses: bound.map(({ address, port }) => ({ address, port })),
+  return bound.then(({ server, address, port }) => ({
+    addresses: [{ address, port }],
     close: () =>
       Promise.all([
-        ...bound.map(
-          ({ server }) =>
-            new Promise<void>((resolve) => {
-              server.close(() => resolve());
-            }),
-        ),
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
         new Promise<void>((resolve) => {
           wss.close(() => resolve());
         }),

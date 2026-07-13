@@ -3,9 +3,9 @@ import path from "node:path";
 
 /** Runtime configuration for a single `startGatowayCore()` invocation. */
 export interface GatowayCoreConfig {
-  /** Port the TCP listener binds to on both 127.0.0.1 and ::1. */
+  /** Port the TCP listener binds to on 127.0.0.1 (IPv4 loopback only, AD-4 v1.1). */
   tcpPort: number;
-  /** Port the WebSocket listener binds to on both 127.0.0.1 and ::1. */
+  /** Port the WebSocket listener binds to on 127.0.0.1 (IPv4 loopback only, AD-4 v1.1). */
   wsPort: number;
   /** Path to the auth token file (design.md's "Trade-off" note; overridable per Open Questions). */
   tokenFilePath: string;

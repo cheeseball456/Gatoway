@@ -82,7 +82,11 @@ function handleRegister(
 ): void {
   const payload = message.payload as Partial<RegisterPayload>;
   const pluginType = typeof payload.pluginType === "string" ? payload.pluginType : "unknown";
-  const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities : [];
+  // `capabilities` omitted on a register message means "unchanged", not "cleared"
+  // (QA-003): only an explicit array replaces a previously-declared manifest.
+  const capabilities = Array.isArray(payload.capabilities)
+    ? payload.capabilities
+    : (connection.capabilities ?? []);
 
   // Already authenticated: this is the WebSocket path (auth already happened at
   // upgrade time via the Origin allowlist) declaring its capability manifest, or a
@@ -95,6 +99,7 @@ function handleRegister(
         connectionId: connection.id,
         transport: connection.transport,
         pluginType,
+        capabilities,
       },
       "plugin registered capabilities",
     );
@@ -125,11 +130,23 @@ function handleRegister(
 
   manager.setPluginInfo(connection.id, pluginType, capabilities);
   manager.transition(connection.id, "authenticated");
+  // QA-001: this is the first `register` message for a TCP connection (the
+  // credential-validating path). It arrives while the connection is still
+  // `authenticating`, so it's dispatched here directly and never reaches the
+  // generic `message_received` log block in `handleRawMessage` (that block is
+  // gated on `authenticated`, which this connection only becomes a few lines
+  // above). The equivalent WebSocket registration *does* reach that block,
+  // because `preAuthenticated` connections are already `authenticated` by the
+  // time their first message arrives (design.md D5). Logging `pluginType` and
+  // `capabilities` here ensures both transports produce the same registration
+  // detail regardless of that authentication-timing difference.
   logger.info(
     {
       event: "authentication_succeeded",
       connectionId: connection.id,
       transport: connection.transport,
+      pluginType,
+      capabilities,
     },
     "authentication succeeded",
   );

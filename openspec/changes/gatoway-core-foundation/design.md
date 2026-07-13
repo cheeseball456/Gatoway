@@ -34,13 +34,16 @@ plugin change can invoke it as a child process without this change needing to kn
 it will be launched. Matches AD-2.
 
 **D2 — Listener architecture.** Node's built-in `net` module for the TCP listener and
-the `ws` package for the WebSocket listener, both bound explicitly to `127.0.0.1`
-(and `::1` for IPv6). Both feed into one internal `ConnectionManager` that owns
-connection state regardless of transport. Per AD-3, message-handling logic does not
-fork by transport — only the connection-accept code does. Alternative considered: a
-single abstraction that fully hides transport differences behind one interface —
-rejected as premature abstraction for two transports with genuinely different accept
-semantics (TCP accept vs. WebSocket HTTP upgrade).
+the `ws` package for the WebSocket listener, both bound explicitly to IPv4 loopback
+(`127.0.0.1`) only — IPv6 loopback (`::1`) is not bound (amended per AD-4 v1.1: requiring
+both addresses failed Gatoway core's entire startup on hosts without IPv6 loopback
+available, for no benefit over IPv4-only loopback). Both feed into one internal
+`ConnectionManager` that owns connection state regardless of transport. Per AD-3,
+message-handling logic does not fork by transport — only the connection-accept code
+does. Alternative considered: a single abstraction that fully hides transport
+differences behind one interface — rejected as premature abstraction for two
+transports with genuinely different accept semantics (TCP accept vs. WebSocket HTTP
+upgrade).
 
 **D3 — Connection identity and state.** Every accepted connection is assigned a UUID
 connection ID immediately on accept, before authentication. The ID is never derived

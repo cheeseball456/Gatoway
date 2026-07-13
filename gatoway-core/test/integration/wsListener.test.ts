@@ -31,7 +31,7 @@ describe("WebSocket listener (integration)", () => {
     handle = undefined;
   });
 
-  it("binds only to loopback addresses, not 0.0.0.0 (tasks.md 6.4)", async () => {
+  it("binds only to IPv4 loopback, not 0.0.0.0 (tasks.md 6.4, AD-4 v1.1)", async () => {
     const port = await findFreePort();
     const manager = new ConnectionManager(silentLogger());
     handle = await startWsListener({
@@ -41,9 +41,8 @@ describe("WebSocket listener (integration)", () => {
       allowedOrigins: [ALLOWED_ORIGIN],
     });
 
-    expect(handle.addresses).toHaveLength(2);
-    const boundAddresses = handle.addresses.map((a) => a.address).sort();
-    expect(boundAddresses).toEqual(["127.0.0.1", "::1"].sort());
+    expect(handle.addresses).toHaveLength(1);
+    expect(handle.addresses[0]?.address).toBe("127.0.0.1");
     for (const bound of handle.addresses) {
       expect(bound.address).not.toBe("0.0.0.0");
       expect(bound.address).not.toBe("::");

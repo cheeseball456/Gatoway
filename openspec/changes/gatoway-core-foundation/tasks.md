@@ -17,8 +17,12 @@
 
 - [x] 3.1 Implement a `ConnectionManager` tracking connection state (connected → authenticating → authenticated → disconnected)
 - [x] 3.2 Implement unique connection ID assignment on accept, independent of plugin type or transport
-- [x] 3.3 Implement the TCP listener bound to `127.0.0.1`/`::1` only, wired into `ConnectionManager`
-- [x] 3.4 Implement the WebSocket listener bound to `127.0.0.1`/`::1` only, wired into `ConnectionManager`
+- [x] 3.3 Implement the TCP listener bound to `127.0.0.1` only, wired into `ConnectionManager`
+      (originally also bound `::1`; dropped per AD-4 v1.1/QA-002 — binding both addresses via
+      `Promise.all` failed startup entirely on hosts without IPv6 loopback available, for no benefit
+      over IPv4-only loopback)
+- [x] 3.4 Implement the WebSocket listener bound to `127.0.0.1` only, wired into `ConnectionManager`
+      (same AD-4 v1.1/QA-002 amendment as 3.3)
 - [x] 3.5 Reject and close connections that send any non-registration message while in the authenticating state
 - [x] 3.6 Remove disconnected connections from active tracking on both graceful and unexpected disconnects
 
@@ -51,8 +55,9 @@
       (script provided at `test/manual/wsTestClient.ts`; accept/reject behavior confirmed via the equivalent
       automated integration test, `test/integration/wsListener.test.ts`)
 - [x] 6.4 Verify listeners are not reachable on any non-loopback interface (e.g. via `netstat`/`lsof`)
-      (verified via an automated assertion on the actual bound socket addresses in
-      `test/integration/tcpListener.test.ts` / `wsListener.test.ts`, rather than a live `netstat`/`lsof` run — see
-      developer summary for why a live background instance wasn't run in this sandbox)
+      (verified via an automated assertion on the actual bound socket address in
+      `test/integration/tcpListener.test.ts` / `wsListener.test.ts` — now asserting a single `127.0.0.1`
+      bind per AD-4 v1.1/QA-002, rather than a live `netstat`/`lsof` run — see developer summary for why
+      a live background instance wasn't run in this sandbox)
 - [x] 6.5 Verify log rotation behavior under a forced size threshold in a test run
       (`test/integration/logger.test.ts`)
