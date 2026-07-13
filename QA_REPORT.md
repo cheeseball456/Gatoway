@@ -242,3 +242,32 @@ No new Observations from this session beyond those already carried forward from 
 ## Review Verdict (this session)
 
 **Recommendation:** ❌ **Requires fixes** — QA-005 is Critical and blocks all further live verification via the standalone entry point. The main agent should route QA-005 to the `developer` subagent as a code-level fix; once fixed, resume `/verify` to complete the checks listed above.
+
+---
+---
+
+# Interactive Verification Session (`/verify`, resumed) — 2026-07-13
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Resuming the prior session after the developer's fix for QA-005 (commit `490eeb7`). Completing the four checks left blocked above.
+**Prepared for:** Technical Architect
+
+## Summary
+
+QA-005 is confirmed fixed: Gatoway core now starts correctly via `npm run dev` from this project's real (space-containing) path. With that unblocked, all four previously-deferred live checks were completed together with the user and all passed. No new issues found.
+
+## Checks Completed
+
+- **Loopback-only binding:** started Gatoway core live; `lsof -nP -iTCP -sTCP:LISTEN` and `netstat -an -p tcp` both showed only `127.0.0.1:47821` and `127.0.0.1:47822` — no `0.0.0.0`/wildcard binding on either listener. User confirmed the same output.
+- **TCP token auth, live:** ran `npm run manual:tcp-client` against the running instance. Valid token → `register_ack` with `status:"ok"`. Invalid token → `register_ack` with `status:"rejected", reason:"invalid_token"`, connection closed. Matches `plugin-authentication` spec scenarios exactly.
+- **WebSocket Origin auth, live:** ran `npm run manual:ws-client`. Allowlisted origin → upgrade accepted, `register_ack` `status:"ok"`. Non-allowlisted origin → upgrade refused outright with HTTP 403 (no connection ever established, matching the spec's "refuses the upgrade request" wording precisely, not merely accept-then-close).
+- **Log content, live:** inspected the actual rotating log file after both exercises. Every event was present and correctly detailed: `gatoway_core_started`, `connection_accepted`/`connection_authenticated`/`authentication_succeeded` (TCP, with `pluginType`/`capabilities` — confirming QA-001's fix holds under a real run, not just tests), `message_sent` (register_ack), `connection_disconnected`, and for WebSocket the equivalent sequence plus `message_received`/`registered` with capabilities, and `authentication_failed` for the rejected origin (including the offending `origin` value).
+- Stopped the live instance afterward; confirmed via `lsof` that both ports were released.
+
+## Observations
+
+No new Observations. The three Observations carried forward from the static review sessions still stand (unchanged, non-blocking): WS `authentication_succeeded` omits `origin` (asymmetric with `authentication_failed`); Windows ACL path for the token file remains unverified on real Windows; `index.ts` logs-and-continues rather than aborting if the token file write fails.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-005 is fixed and verified live. All planned `/verify` checks (loopback-only binding, TCP token auth accept/reject, WebSocket Origin auth accept/reject, live log content) passed under direct, hands-on observation with the user, using the real standalone entry point rather than only the automated test suite. No open Critical/Major/Minor issues remain. This change is ready for `doc-writer` and `/opsx:archive`.
