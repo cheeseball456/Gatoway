@@ -63,10 +63,12 @@ export class ConnectionManager {
     return record;
   }
 
+  /** Looks up a connection by ID, or `undefined` if it has no active record. */
   get(id: string): ConnectionRecord | undefined {
     return this.connections.get(id);
   }
 
+  /** Returns a snapshot of all currently-tracked connections. */
   list(): ConnectionRecord[] {
     return [...this.connections.values()];
   }
