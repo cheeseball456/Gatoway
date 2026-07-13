@@ -1,6 +1,6 @@
 # Requirements: Gatoway
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-07-13
 **Status:** Draft — pending architect review
 
@@ -37,6 +37,7 @@ No hard deadline or budget constraint. Development and testing will use an Elgat
 - A no-code configuration/mapping UI for non-developer End Users (deferred to a future release)
 - Multi-instance support for a single application running more than once at a time (not precluded architecturally, but not a near-term requirement)
 - Remote/networked operation beyond a single local machine
+- A Linux-native Stream Deck hardware experience (deferred — Elgato's own Stream Deck software has no Linux build at all; supporting Linux here would require either an alternative integration path or custom-written software, neither of which is designed or scoped yet)
 
 ---
 
@@ -140,6 +141,8 @@ No reporting dashboards or data exports are required. Logging (FR-006) covers de
 ### 3.4 Platforms and Browsers
 Gatoway core must run on Windows, macOS, and Linux. Individual application plugins may be constrained by the platform support of their host application (e.g. Lightroom Classic is Windows/Mac only; a Linux-only setup would only support applications with Linux-compatible plugins).
 
+This cross-platform requirement covers Gatoway core specifically. The Stream Deck plugin — the hardware-facing UI that talks to the physical Stream Deck — is constrained to Windows and macOS only, because Elgato's own Stream Deck software has no Linux build at all. This is a vendor limitation, not a gap in Gatoway's own design: Gatoway core remains fully portable to Linux, but there is currently no way to drive physical Stream Deck hardware from a Linux machine at all, through Gatoway or otherwise.
+
 ### 3.5 Internationalisation
 English only; no other languages or locales required at this time.
 
@@ -163,6 +166,7 @@ English only; no other languages or locales required at this time.
 | 2 | What is the specific authentication/access-control mechanism for the local WebSocket channel? | Architect | Before/during architecture design |
 | 3 | What does the configuration backup/recovery approach look like? | Architect / Developer | Before/during architecture design |
 | 4 | What does the End User (non-developer) mapping/configuration UI look like? | To be defined | Post-MVP |
+| 5 | If Linux support for the physical Stream Deck experience becomes a priority, what alternative integration path or custom software would provide it, given Elgato's own Stream Deck software has no Linux build? | To be defined | Deferred — no current priority |
 
 ---
 
