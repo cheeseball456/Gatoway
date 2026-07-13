@@ -1,0 +1,29 @@
+{
+  "name": "@gatoway/stream-deck-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Stream Deck plugin that spawns and supervises Gatoway core, connects to it as an authenticated client, and renders the static idle profile on physical Stream Deck hardware.",
+  "type": "module",
+  "main": "dist/plugin.js",
+  "engines": {
+    "node": ">=20.5.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/plugin.ts",
+    "start": "node dist/plugin.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^2.1.0",
+    "@gatoway/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
