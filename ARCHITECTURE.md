@@ -1,7 +1,7 @@
 # Architecture: Gatoway
 
-**Version:** 1.1
-**Date:** 2026-07-13
+**Version:** 1.2
+**Date:** 2026-07-14
 **Status:** Draft — ready for change proposals
 
 ---
@@ -32,9 +32,12 @@ focused.
   logging. Runs as a single local process per machine.
 - **Stream Deck Plugin** (Node.js/TypeScript, built on the Elgato Stream Deck SDK) —
   spawns and supervises the Gatoway Core child process (restarting it if it crashes),
-  connects to Gatoway Core as the display/input client, forwards button presses and
-  dial turns, and renders whatever profile/state Gatoway Core instructs via the Stream
-  Deck SDK.
+  connects to Gatoway Core as the display/input client, and forwards raw physical
+  input (which position was pressed, which dial turned by how much) and renders
+  whatever position-addressed icon/label/state Gatoway Core instructs via the Stream
+  Deck SDK. Per AD-8, the plugin has no app-specific knowledge at all — it is a
+  generic input/output device driver; Gatoway Core alone resolves what a given
+  position means.
 - **Application Plugins** (per-app, outside Gatoway's own codebase, but speaking its
   protocol):
   - **Lightroom Classic Plugin** (Lua) — the existing plugin's proven TCP + JSON-Lines
@@ -61,6 +64,7 @@ focused.
 | AD-5 | Authentication: shared-secret token handshake for TCP (native) connections; `Origin`-header allowlisting for WebSocket (browser) connections | Decided | Native plugins can read a local token file with no friction; browser extensions cannot read arbitrary local files, but browsers do send a reliable `Origin` header identifying the extension. Both checks operate *within* the loopback-only boundary (AD-4), distinguishing legitimate plugins from other local processes — they do not, and are not meant to, restrict network origin (that's AD-4's job) | Manual one-time token entry into the browser extension (rejected: more setup friction, no real security benefit over Origin-checking within the same threat model); dropping authentication entirely (rejected: NFR 3.3 is a firm requirement raised by the user; see Risk R-1 for what "no auth" would actually expose) |
 | AD-6 | Plugins declare their own action/capability manifest at connect time (in-memory); Gatoway core owns and persists the button/dial layout mapping (which action is bound to which position, per profile) as a local config file | Decided | Resolves REQUIREMENTS.md Open Question #1. Keeps Gatoway free of any app-specific knowledge (each plugin knows its own actions), while giving the future no-code mapping UI (FR post-MVP) a single, simple place to read/write layout — a plain local file, which also answers Open Question #3 (config backup is just "copy the file") | A database or structured config service — rejected as unwarranted complexity for a personal-use tool with no concurrent multi-user access |
 | AD-7 | Plugins self-report focus/blur; Gatoway core tracks the focused connection and switches the Stream Deck to that plugin's profile, falling back to an idle profile when nothing is focused | Decided | Matches FR-003/FR-004; keeps focus detection consistent across native (OS-level detection would differ per platform) and browser-based plugins (no OS-level window concept for a browser tab) | Gatoway performing OS-level active-window detection itself — rejected as inconsistent across plugin types and not needed once self-reporting is adopted uniformly |
+| AD-8 | The Stream Deck plugin's manifest declares only a small, fixed set of generic, position-based action types (one for keys, one for dials) — never one action per app-specific command. The plugin forwards raw physical events (position pressed, dial delta) to Gatoway core and renders whatever position-addressed content Gatoway core sends back; Gatoway core alone resolves "this position, in this profile" to a specific app's specific capability, using AD-6's persisted layout config and the currently-focused connection (AD-7) | Decided | This is the actual mechanism that makes the core app-agnostic at the hardware layer, not just at the data layer: Elgato's SDK requires action UUIDs to be declared statically in `manifest.json` at build time, so a distinct UUID per app-specific command (as the original single-app Lightroom plugin did) would mean rebuilding/republishing the Stream Deck plugin every time a new app is added — defeating the entire premise of Gatoway. Keeping the plugin fully generic means it never changes again as apps are added; all app-specific knowledge lives in Gatoway core, consistent with AD-6. Requires two new position-based message types in `message-protocol` (a `key_event`/dial-event from plugin to core, and a `render_update` from core to plugin) to be added when this is implemented | Distinct action UUIDs per app-specific command (rejected: requires a manifest rebuild per app, defeats agnosticism); Elgato's native per-key settings + a Property Inspector web UI for configuring each key's target (rejected for now: `REQUIREMENTS.md` scopes the MVP mapping story as developer-driven, editing Gatoway's own config directly, with a no-code UI explicitly deferred post-MVP — building a Property Inspector now would duplicate that future work before it's needed) |
 
 ---
 
@@ -135,11 +139,16 @@ only new logic for resolving which instance's profile is active.
    (Lightroom profile ↔ idle) end to end. Building on already-working networking code
    de-risks the foundation before tackling the harder net-new piece.
 4. **Generalize focus/profile state machine** — extend from single-app to genuinely
-   tracking multiple simultaneous connections and arbitrating focus between them.
+   tracking multiple simultaneous connections and arbitrating focus between them. This
+   step (or a dedicated delta change alongside it) must also introduce the generic,
+   position-based action model from AD-8: replace the Stream Deck plugin's current
+   single static "Idle" action with the small, fixed set of generic Key/Dial action
+   types, and add the `key_event`/`render_update` message types to `message-protocol`.
 5. **xDesign integration (browser path)** — build the xDender WebSocket client and
    Origin auth; validate full multi-app switching (Lightroom ↔ xDesign ↔ idle).
 6. **Persisted layout config** — move profile/button-mapping definitions from
-   hardcoded/in-code into the local config file, with load/save in Gatoway core.
+   hardcoded/in-code into the local config file, with load/save in Gatoway core. This
+   is where AD-8's position → capability resolution actually reads its bindings from.
 7. **(Post-MVP) End User no-code mapping UI** — deferred; design not started (see Risk
    R-2).
 
@@ -153,6 +162,7 @@ only new logic for resolving which instance's profile is active.
 | R-2 | Question | The End User (non-developer) no-code mapping UI is entirely undesigned | Future requirements/architecture pass, post-MVP |
 | R-3 | Minor | Layout config file has no schema-migration/versioning strategy yet | Developer, revisit before any public release |
 | R-4 | Observation | A future application that cannot self-report its own focus (e.g. one that can't be modified to add a signal) isn't addressed by the self-reporting model (AD-7) | Revisit architecture if/when such an application is targeted |
+| R-5 | Major (blast radius) | AD-8 (decided after `stream-deck-plugin-skeleton` was already implemented, reviewed, and merged) means that change's manifest/action design — one static, hardcoded "Idle" action — does not yet follow the generic, position-based model. It isn't wrong for what it was scoped to build (there was no app-specific routing to generalize yet), but it will need a delta change to adopt AD-8's generic Key/Dial action types before step 4/6 can route real commands through it | Main agent: open a delta OpenSpec change against `stream-deck-idle-display`/`stream-deck-core-client` when delivery-sequence step 4 begins, to re-flow this work downward |
 
 ---
 
