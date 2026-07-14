@@ -37,3 +37,19 @@ what is changing.
 #### Scenario: Render update changes a key's label
 - **WHEN** Gatoway core sends a `render_update` with a `controller`, `position`, and a `label` but no `icon` or `state`
 - **THEN** the Stream Deck plugin updates only the label at that position, leaving any existing icon/state unchanged
+
+### Requirement: Command Message Type
+The protocol SHALL define a `command` message type that Gatoway core sends to an
+application plugin once an `input_event` has been resolved against that plugin's bound
+capability, with payload `{ capabilityId: string, eventType: "keyDown" | "keyUp" | "rotate"
+| "push", delta? }`. `eventType`/`delta` carry the same raw gesture information the
+originating `input_event` reported, rather than an abstracted trigger/adjust vocabulary —
+the application plugin itself decides what a given gesture means for its own capability.
+
+#### Scenario: Resolved key press sent as a command
+- **WHEN** Gatoway core resolves an `input_event` with `eventType: "keyDown"` against a bound capability on the focused connection
+- **THEN** Gatoway core sends that connection a `command` message with the matching `capabilityId` and `eventType: "keyDown"`
+
+#### Scenario: Resolved dial rotation sent as a command
+- **WHEN** Gatoway core resolves an `input_event` with `eventType: "rotate"` and a `delta` against a bound capability on the focused connection
+- **THEN** Gatoway core sends that connection a `command` message with the matching `capabilityId`, `eventType: "rotate"`, and the same `delta`
