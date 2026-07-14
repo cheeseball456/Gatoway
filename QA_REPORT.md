@@ -913,3 +913,23 @@ However, testing the missing-config fallback path surfaced a new, real gap: a **
 ## Review Verdict (this session)
 
 **Recommendation:** ⚠️ **Conditional pass** — The core file-backed binding mechanism (loading, resolution by plugin type, the D3 union behavior) is fully confirmed correct on real hardware, including the specific scenario task 4.4 deferred. One Major, design-level finding (QA-014) is open: the interaction between a missing config and a full plugin restart can leave placed actions in an inconsistent, uncorrected state indefinitely — a real first-run risk, not a rare edge case. The main agent should route this to `/design-architecture` (or handle as a design revision within this change, given it directly touches this change's own D4) before archiving, since it affects the actual first-run experience this change is meant to unblock.
+
+---
+---
+
+# QA-014 Fix Re-Verification — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Re-checking the developer's QA-014 fix (commit `6dd1e8a`: `genericKeyRenderer.ts`/`genericDialRenderer.ts` now apply a local default baseline — the manifest's declared label/icon — whenever no remembered render state exists, independent of Gatoway core) by reproducing the exact original failure scenario live.
+
+## Outcome: Resolved, confirmed by direct reproduction
+
+Reproduced the identical sequence that originally surfaced QA-014: the layout config file was removed and the Stream Deck plugin was restarted (`streamdeck restart`), reproducing a full plugin-process restart with no config file present — the exact combination that previously left the dial stuck showing "Dial" indefinitely.
+
+**Result:** the dial now correctly shows "Gatoway" immediately, confirmed directly by the user, with no stuck or uninitialized appearance. The config file was then restored and the plugin restarted again; all four positions (three keypad, one dial) were confirmed correct afterward.
+
+187 tests pass across both packages (up from 165 before this fix cycle), typecheck clean for both.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-014 is confirmed resolved by direct reproduction of the original failure scenario, not just by trusting the fix's own unit tests. Both the core file-backed binding mechanism (this change's primary purpose) and the local-default-baseline fix are now fully verified on real hardware. This change is ready for `doc-writer` (the layout config schema documentation design.md anticipates, plus the already-open `docs/PROTOCOL.md` gaps if any remain) and `/opsx:archive`.
