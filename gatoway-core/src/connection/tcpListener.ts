@@ -7,6 +7,7 @@ import { encodeNdjsonLine, NdjsonDecoder } from "../protocol/tcpFraming.js";
 import type { AuthenticateFn } from "./messageHandler.js";
 import { handleRawMessage } from "./messageHandler.js";
 import type { ConnectionManager } from "./connectionManager.js";
+import type { ProtocolRouter } from "./protocolRouter.js";
 
 /**
  * The loopback address the TCP listener binds to (design.md D2, connection-management
@@ -22,6 +23,8 @@ export interface TcpListenerOptions {
   logger: Logger;
   /** The current auth token, read once at startup (design.md D5: regenerated per process start). */
   currentToken: string;
+  /** Handles `focus`/`input_event` messages and registration notifications (focus-tracking/profile-routing). Optional: omitted in tests that don't exercise those message types. */
+  router?: ProtocolRouter;
 }
 
 export interface TcpListenerHandle {
@@ -44,6 +47,7 @@ function handleSocket(
   manager: ConnectionManager,
   logger: Logger,
   authenticate: AuthenticateFn,
+  router: ProtocolRouter | undefined,
 ): void {
   const decoder = new NdjsonDecoder();
   socket.setEncoding("utf8");
@@ -61,7 +65,7 @@ function handleSocket(
   socket.on("data", (chunk: string) => {
     const lines = decoder.push(chunk);
     for (const line of lines) {
-      handleRawMessage(line, connection, manager, authenticate, logger);
+      handleRawMessage(line, connection, manager, authenticate, logger, router);
     }
   });
 
@@ -89,7 +93,7 @@ export function startTcpListener(options: TcpListenerOptions): Promise<TcpListen
   const bound = new Promise<{ server: Server; address: string; port: number }>(
     (resolve, reject) => {
       const server = createServer((socket) => {
-        handleSocket(socket, options.manager, options.logger, authenticate);
+        handleSocket(socket, options.manager, options.logger, authenticate, options.router);
       });
       server.on("error", (err) => {
         options.logger.error(

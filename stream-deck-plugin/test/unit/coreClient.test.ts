@@ -213,4 +213,80 @@ describe("CoreClient", () => {
       expect.objectContaining({ event: "core_client_token_read_failed" }),
     );
   });
+
+  it("sends a well-formed input_event message once connected", async () => {
+    const logger = fakeLogger();
+    const socket = fakeSocket();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => socket,
+      readToken: async () => "token",
+    });
+
+    client.start();
+    await flush();
+    socket.emit("connect");
+    socket.emit(
+      "data",
+      `${JSON.stringify({ type: "register_ack", payload: { status: "ok", connectionId: "abc" } })}\n`,
+    );
+
+    client.sendInputEvent({
+      controller: "keypad",
+      position: { row: 0, column: 0 },
+      eventType: "keyDown",
+    });
+
+    expect(socket.written).toHaveLength(2); // register, then input_event
+    expect(JSON.parse(socket.written[1] as string)).toEqual({
+      type: "input_event",
+      payload: { controller: "keypad", position: { row: 0, column: 0 }, eventType: "keyDown" },
+    });
+  });
+
+  it("drops an input_event (logging a warning) rather than sending it while not connected", async () => {
+    const logger = fakeLogger();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => fakeSocket(),
+      readToken: async () => "token",
+    });
+
+    client.sendInputEvent({
+      controller: "keypad",
+      position: { row: 0, column: 0 },
+      eventType: "keyDown",
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("dropping input_event"),
+      expect.objectContaining({ event: "core_client_input_event_dropped" }),
+    );
+  });
+
+  it("dispatches a render_update message to the onRenderUpdate callback", async () => {
+    const logger = fakeLogger();
+    const socket = fakeSocket();
+    const onRenderUpdate = vi.fn();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => socket,
+      readToken: async () => "token",
+      onRenderUpdate,
+    });
+
+    client.start();
+    await flush();
+    socket.emit("connect");
+    const payload = { controller: "keypad", position: { row: 0, column: 0 }, label: "Hello" };
+    socket.emit("data", `${JSON.stringify({ type: "render_update", payload })}\n`);
+
+    expect(onRenderUpdate).toHaveBeenCalledWith(payload);
+  });
 });

@@ -6,10 +6,13 @@ import {
 } from "../protocol/envelope.js";
 import type {
   ErrorPayload,
+  FocusPayload,
+  InputEventPayload,
   RegisterAckPayload,
   RegisterPayload,
 } from "../protocol/messages.js";
 import type { ConnectionManager } from "./connectionManager.js";
+import type { ProtocolRouter } from "./protocolRouter.js";
 import type { ConnectionRecord } from "./types.js";
 
 export type AuthenticationResult = { ok: true } | { ok: false; reason: string };
@@ -79,6 +82,7 @@ function handleRegister(
   manager: ConnectionManager,
   authenticate: AuthenticateFn,
   logger: Logger,
+  router: ProtocolRouter | undefined,
 ): void {
   const payload = message.payload as Partial<RegisterPayload>;
   const pluginType = typeof payload.pluginType === "string" ? payload.pluginType : "unknown";
@@ -104,6 +108,7 @@ function handleRegister(
       "plugin registered capabilities",
     );
     sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
+    router?.handleRegistered(connection);
     return;
   }
 
@@ -151,12 +156,17 @@ function handleRegister(
     "authentication succeeded",
   );
   sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
+  router?.handleRegistered(connection);
 }
 
 /**
  * Dispatches a single raw (already-framed) message received on a connection. Shared by
  * both the TCP and WebSocket listeners: per design.md D2/D3, message-handling logic
  * does not fork by transport, only the connection-accept code does.
+ *
+ * `router` is optional (focus-tracking/profile-routing, design.md D2-D4): when omitted,
+ * `register`/`error` handling behaves exactly as before this change, so existing
+ * callers/tests are unaffected. Production wiring (`index.ts`) always supplies one.
  */
 export function handleRawMessage(
   raw: string,
@@ -164,6 +174,7 @@ export function handleRawMessage(
   manager: ConnectionManager,
   authenticate: AuthenticateFn,
   logger: Logger,
+  router?: ProtocolRouter,
 ): void {
   let message: GatowayMessage;
   try {
@@ -203,7 +214,7 @@ export function handleRawMessage(
       connection.close("non_register_before_auth");
       return;
     }
-    handleRegister(message, connection, manager, authenticate, logger);
+    handleRegister(message, connection, manager, authenticate, logger, router);
     return;
   }
 
@@ -224,7 +235,7 @@ export function handleRawMessage(
   );
 
   if (message.type === "register") {
-    handleRegister(message, connection, manager, authenticate, logger);
+    handleRegister(message, connection, manager, authenticate, logger, router);
     return;
   }
 
@@ -233,6 +244,16 @@ export function handleRawMessage(
     return;
   }
 
-  // Command and state-update message types are defined in a later change, once a
-  // plugin exists to use them (proposal.md's "Out of scope"). Nothing to dispatch to.
+  if (message.type === "focus") {
+    router?.handleFocus(connection, message.payload as FocusPayload);
+    return;
+  }
+
+  if (message.type === "input_event") {
+    router?.handleInputEvent(connection, message.payload as InputEventPayload);
+    return;
+  }
+
+  // `render_update`/`command` are core -> plugin only; nothing dispatches to Gatoway
+  // core sending them, so there's nothing to handle here even if one arrived.
 }

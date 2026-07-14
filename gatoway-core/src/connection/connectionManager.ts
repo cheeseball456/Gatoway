@@ -35,8 +35,21 @@ export interface AcceptConnectionOptions {
  */
 export class ConnectionManager {
   private readonly connections = new Map<string, ConnectionRecord>();
+  private readonly disconnectListeners: Array<
+    (record: ConnectionRecord, reason?: string) => void
+  > = [];
 
   constructor(private readonly logger: Logger) {}
+
+  /**
+   * Registers a listener invoked whenever a connection disconnects (after it has been
+   * removed from tracking). Additive hook for focus-tracking (task 2.4): lets
+   * `ProfileRouter` clear focus on disconnect without `ConnectionManager` needing to
+   * know anything about focus/profile-routing itself.
+   */
+  onDisconnect(listener: (record: ConnectionRecord, reason?: string) => void): void {
+    this.disconnectListeners.push(listener);
+  }
 
   /** Registers a newly-accepted connection and assigns it a unique connection ID. */
   accept(options: AcceptConnectionOptions): ConnectionRecord {
@@ -125,5 +138,8 @@ export class ConnectionManager {
       },
       "connection disconnected",
     );
+    for (const listener of this.disconnectListeners) {
+      listener(record, reason);
+    }
   }
 }

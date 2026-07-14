@@ -1,6 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
-import type { GatowayMessage, RegisterAckPayload, RegisterPayload } from "@gatoway/core";
+import type {
+  GatowayMessage,
+  InputEventPayload,
+  RegisterAckPayload,
+  RegisterPayload,
+  RenderUpdatePayload,
+} from "@gatoway/core";
 import { nextBackoffDelayMs } from "../backoff.js";
 import type { PluginLogger } from "../logging/pluginLogger.js";
 import { encodeNdjsonLine, NdjsonLineDecoder } from "./protocol.js";
@@ -40,6 +46,12 @@ export interface CoreClientOptions {
   now?: () => number;
   /** See `DEFAULT_INITIAL_GRACE_PERIOD_MS`. */
   initialGracePeriodMs?: number;
+  /**
+   * Invoked whenever Gatoway core sends a `render_update` message (focus-profile-routing,
+   * design.md D1/D4). The generic Key/Dial actions (`plugin.ts`) use this to keep their
+   * displayed content in sync with whichever connection currently has focus.
+   */
+  onRenderUpdate?: (payload: RenderUpdatePayload) => void;
 }
 
 function defaultConnect(port: number, host: string): Socket {
@@ -73,6 +85,7 @@ export class CoreClient {
   private readonly backoffMs: (attempt: number) => number;
   private readonly now: () => number;
   private readonly initialGracePeriodMs: number;
+  private readonly onRenderUpdate: ((payload: RenderUpdatePayload) => void) | undefined;
 
   private state: CoreClientState = "disconnected";
   private socket: Socket | undefined;
@@ -93,6 +106,7 @@ export class CoreClient {
     this.backoffMs = options.backoffMs ?? ((attempt) => nextBackoffDelayMs(attempt));
     this.now = options.now ?? Date.now;
     this.initialGracePeriodMs = options.initialGracePeriodMs ?? DEFAULT_INITIAL_GRACE_PERIOD_MS;
+    this.onRenderUpdate = options.onRenderUpdate;
   }
 
   /** The client's current connection state. */
@@ -105,6 +119,24 @@ export class CoreClient {
     this.stopped = false;
     this.startedAt = this.now();
     void this.connectOnce();
+  }
+
+  /**
+   * Forwards a raw physical input event to Gatoway core (design.md D1, AD-8). Dropped
+   * (logged, not queued/retried) when not currently connected - there is no focused
+   * application to route it to in that case anyway, and no `input_event` acknowledgement
+   * exists in the protocol to make retrying meaningful.
+   */
+  sendInputEvent(payload: InputEventPayload): void {
+    if (this.state !== "connected" || !this.socket) {
+      this.logger.warn("dropping input_event: not connected to Gatoway core", {
+        event: "core_client_input_event_dropped",
+        payload,
+      });
+      return;
+    }
+    const message: GatowayMessage<InputEventPayload> = { type: "input_event", payload };
+    this.socket.write(encodeNdjsonLine(message));
   }
 
   /** Stops the client: cancels any pending reconnect and closes the current socket. */
@@ -211,8 +243,13 @@ export class CoreClient {
   }
 
   private handleMessage(message: GatowayMessage): void {
+    if (message.type === "render_update") {
+      this.onRenderUpdate?.(message.payload as RenderUpdatePayload);
+      return;
+    }
+
     if (message.type !== "register_ack") {
-      // No other message types are handled yet (proposal.md's "Out of scope").
+      // No other message types are handled by this client (proposal.md's "Out of scope").
       return;
     }
 

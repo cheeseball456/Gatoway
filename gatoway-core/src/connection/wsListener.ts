@@ -6,6 +6,7 @@ import { isOriginAllowed } from "../auth/originAllowlist.js";
 import { encodeWsFrame } from "../protocol/wsFraming.js";
 import { handleRawMessage, type AuthenticateFn } from "./messageHandler.js";
 import type { ConnectionManager } from "./connectionManager.js";
+import type { ProtocolRouter } from "./protocolRouter.js";
 
 /**
  * The loopback address the WebSocket listener binds to (design.md D2,
@@ -22,6 +23,8 @@ export interface WsListenerOptions {
   logger: Logger;
   /** Allowlisted Origin header values (design.md D5). */
   allowedOrigins: readonly string[];
+  /** Handles `focus`/`input_event` messages and registration notifications (focus-tracking/profile-routing). Optional: omitted in tests that don't exercise those message types. */
+  router?: ProtocolRouter;
 }
 
 export interface WsListenerHandle {
@@ -74,7 +77,14 @@ export function startWsListener(options: WsListenerOptions): Promise<WsListenerH
 
     ws.on("message", (data, isBinary) => {
       const raw = isBinary ? Buffer.from(data as Buffer).toString("utf8") : data.toString();
-      handleRawMessage(raw, connection, options.manager, alreadyAuthenticated, options.logger);
+      handleRawMessage(
+        raw,
+        connection,
+        options.manager,
+        alreadyAuthenticated,
+        options.logger,
+        options.router,
+      );
     });
 
     ws.on("close", () => {
