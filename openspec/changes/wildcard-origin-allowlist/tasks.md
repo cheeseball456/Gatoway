@@ -10,6 +10,7 @@
 - [x] 2.3 Unit tests: a wildcard entry does NOT match an origin with a different scheme/prefix (e.g. `moz-extension://*` does not match `chrome-extension://foo`)
 - [x] 2.4 Unit tests: an allowlist with both an exact entry and a wildcard entry correctly accepts origins matching either
 - [x] 2.5 Manually verify: run the existing manual WebSocket test client with `GATOWAY_ALLOWED_ORIGINS=moz-extension://*` and confirm both a `moz-extension://<uuid-A>` and `moz-extension://<uuid-B>` origin are both accepted, while a non-matching origin is still refused
+  - [x] QA-016 follow-up: confirmed via `npm run manual:ws-client` against a real, standalone-launched Gatoway core process configured with `GATOWAY_ALLOWED_ORIGINS=moz-extension://*` — two distinct `moz-extension://` origins (different UUIDs) were both accepted, and a throwaway ad hoc script driving a `chrome-extension://` origin against the same running instance was refused
 
 ## 3. Documentation
 

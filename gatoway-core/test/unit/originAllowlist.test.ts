@@ -43,5 +43,21 @@ describe("originAllowlist", () => {
       expect(isOriginAllowed("chrome-extension://anything", ["*"])).toBe(true);
       expect(isOriginAllowed("moz-extension://anything-else", ["*"])).toBe(true);
     });
+
+    it("does NOT treat a '*' in a non-trailing position as a wildcard (QA-015)", () => {
+      // design.md D1 scopes this change to a single *trailing* wildcard only. An
+      // entry with `*` anywhere else must be treated as an exact-match literal, not
+      // a prefix/suffix/glob pattern.
+      const leadingWildcard = ["*moz-extension://bar"];
+      expect(isOriginAllowed("moz-extension://bar", leadingWildcard)).toBe(false);
+      expect(isOriginAllowed("xmoz-extension://bar", leadingWildcard)).toBe(false);
+      expect(isOriginAllowed("*moz-extension://bar", leadingWildcard)).toBe(true);
+
+      const midStringWildcard = ["moz-extension://*foo"];
+      expect(isOriginAllowed("moz-extension://foo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://xfoo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://anythingfoo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://*foo", midStringWildcard)).toBe(true);
+    });
   });
 });
