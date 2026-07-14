@@ -664,3 +664,54 @@ Manual verification (tasks.md 6.5) remains correctly deferred to `/verify` per t
 ## Review Verdict
 
 **Recommendation:** ❌ **Requires fixes** — QA-010 is a Major, code-level issue that undercuts this change's own headline addition (live capability display updates, including the icon-reset case the task-group-7 addendum was written specifically to deliver) in a realistic, in-scope multi-app scenario, with no test in either suite currently guarding against it. QA-011 is Minor and should be routed to `doc-writer` rather than blocking progress on its own. Every other area this review was asked to specifically scrutinize — D2's focus-supersession cleanliness, `LayoutResolver`'s id-based contract (including its correct extension to `input_event` resolution), and `capability_update`'s own-connection-only enforcement and focused/not-focused re-render gating — is sound. Once QA-010 is fixed (with regression tests for both scenarios described above), this change should return to static review only for that fix before proceeding to `/verify` with real or test-double hardware.
+
+---
+
+# Re-verification Session — 2026-07-14 — `focus-profile-routing` (QA-010 fix)
+
+**Reviewer:** QA Engineer
+**Scope:** Re-review of the QA-010 (Major) fix on branch `focus-profile-routing`, HEAD `0a151cc` — `sendBoundLayoutSweep` and `handleCapabilityUpdate`'s immediate re-render in `gatoway-core/src/routing/profileRouter.ts`, the accompanying `Capability.icon` doc-comment in `gatoway-core/src/protocol/messages.ts`, and the new regression tests in `gatoway-core/test/unit/profileRouter.test.ts` and `gatoway-core/test/integration/focusProfileRouting.integration.test.ts`. Reviewed against the QA-010 finding above, `design.md` D3/D4/D7, `tasks.md`'s new post-review addendum, and re-run of the full test suite and typecheck for both packages.
+**Prepared for:** Technical Architect
+
+## Summary
+
+QA-010 is resolved. Both previously-affected call sites — `sendBoundLayoutSweep` (the bound-layout sweep on focus gain) and `handleCapabilityUpdate`'s immediate re-render — now assert `capability.icon ?? null` rather than passing `capability.icon` straight through, so an unset icon always serializes as an explicit `null` on the wire instead of being dropped. I checked all three places `RenderUpdatePayload.icon` is constructed in `profileRouter.ts` (the idle sweep, already correct at the time of the original review; the two just fixed) and confirmed no other code path builds a `render_update` from a live `Capability` without going through one of these three. The developer's decision not to change `Capability.icon`'s stored type (`string | undefined`) is sound: I traced every read of `.icon` on a live `Capability` object in both packages (`grep -rn "\.icon\b"` across `gatoway-core/src` and `stream-deck-plugin/src`) and confirmed the only places the "never set" vs. "explicitly reset" distinction is observable are exactly these three wire-construction sites, all of which are full, authoritative statements of a position's current display rather than partial deltas — so collapsing both cases to `null` at the wire boundary is correct and loses no information any other code path depends on.
+
+The developer added a regression test for each of QA's two original reproduction scenarios at both the unit level (`profileRouter.test.ts`, driving `ProfileRouter` directly) and the real-socket integration level (`focusProfileRouting.integration.test.ts`, a genuine TCP listener with test-double clients). I specifically checked that these tests assert on the wire form rather than a merely-falsy check that an omitted field would also satisfy: the integration tests decode incoming bytes via `JSON.parse(line)` on data read directly off the real socket (`TestDoubleClient`'s `data` handler, `focusProfileRouting.integration.test.ts:64-69`), and both the unit and integration versions of both tests assert `Object.prototype.hasOwnProperty.call(payload, "icon")` is `true` in addition to `payload.icon === null` — this is exactly the assertion shape needed to distinguish "explicit `null`" from "key absent," and I confirmed by inspection that an omitted-field regression (i.e. reverting to the pre-fix `icon: capability.icon`) would fail the `hasOwnProperty` assertion specifically, not just the value assertion. Ran the full suite: all four new regression tests pass, both packages' typecheck is clean, and nothing else regressed (104/104 gatoway-core tests, 61/61 stream-deck-plugin tests).
+
+QA-011 (`docs/PROTOCOL.md` staleness, Minor) is untouched by this commit, as expected — it was already correctly scoped in the original review as a documentation-only finding to route to `doc-writer` rather than block on. I re-confirmed it is still open: `docs/PROTOCOL.md` still shows `RenderUpdatePayload.icon` and `Capability.icon` as `icon?: string;` (lines 91, 234) with no `capability_update` section, unchanged from the original finding. This is not a regression introduced by the QA-010 fix — it was never in scope for it — but it remains an open item that should be routed to `doc-writer` before this change is archived.
+
+---
+
+## Per-finding re-verification
+
+| ID | Severity | Original location | Status now | Notes |
+|----|----------|--------------------|------------|-------|
+| QA-010 | Major | `gatoway-core/src/routing/profileRouter.ts:222-233,285-297` | **Resolved** | Both call sites now assert `capability.icon ?? null`; verified via code inspection, new unit + real-socket integration regression tests (which correctly assert wire-level key presence, not just falsiness), and full suite re-run. |
+| QA-011 | Minor | `docs/PROTOCOL.md`, `openspec/changes/focus-profile-routing/tasks.md:36` | **Open, unchanged** | Out of scope for this commit as expected. Confirmed still stale (no `capability_update` section; `icon?: string` shown without the `| null` reset semantics). Routing note stands: hand to `doc-writer` before archive, not a blocker on its own. |
+
+---
+
+## Regression check
+
+- **Typecheck:** `npm run typecheck` (root, runs both workspaces) — clean, no errors, both `gatoway-core` and `stream-deck-plugin`.
+- **Full test suite:** `npm test` (root) — `gatoway-core`: 17 test files, 104/104 passed. `stream-deck-plugin`: 13 test files, 61/61 passed. No failures, no skips other than the normal per-file test isolation.
+- **Targeted run of the four new QA-010 regression tests** (`npx vitest run -t "QA-010"`, from `gatoway-core/`): all four pass —
+  - `profileRouter.test.ts` › "QA-010 regression: sends icon:null (not omitted) when focus supersedes directly to a connection whose bound capability has no icon"
+  - `profileRouter.test.ts` › capability_update › "QA-010 regression: immediately re-renders icon:null (not omitted) when a capability_update explicitly resets icon to null"
+  - `focusProfileRouting.integration.test.ts` › "QA-010 regression: sends icon:null (not omitted) on the wire when focus supersedes directly to an app whose bound capability has no icon"
+  - `focusProfileRouting.integration.test.ts` › capability_update › "QA-010 regression: immediately re-renders icon:null on the wire when capability_update explicitly resets icon to null"
+- **Wire-form assertion check (the specific ask for this session):** confirmed all four new tests include `Object.prototype.hasOwnProperty.call(payload, "icon")` (or an equivalent full-object `toEqual` that would fail if the key were absent, in the unit tests) alongside `expect(payload.icon).toBeNull()`. The integration tests' `payload` comes from `JSON.parse(line)` on bytes read off a real, running TCP socket (`focusProfileRouting.integration.test.ts:64-69`, `startTcpListener`), not an in-memory object — so these assertions genuinely exercise the JSON-serialization boundary QA-010 was about, not just the pre-serialization JS value.
+- **No other regressions found.** Re-read the full `profileRouter.ts` (all 335 lines) to confirm the fix didn't touch or affect `handleInputEvent`, `handleFocus`, `handleDisconnect`, `sendIdleSweep`, or the `capability_update` sparse-merge logic (`profileRouter.ts:189-199`) — all unchanged from the previously-reviewed version. Diff for this commit (`git show --stat 0a151cc`) touches only `messages.ts` (doc comment only, no type change), `profileRouter.ts` (the two `?? null` additions plus explanatory comments), the two test files, and `tasks.md`.
+
+---
+
+## Observations carried forward
+
+- The two prior sessions' Observations (round-trip test coverage for `command`/`capability_update` envelopes; `ARCHITECTURE.md`'s stale `key_event` naming; `findStreamDeckConnection()`'s unhandled dual-Stream-Deck-connection race) remain unaddressed and are unaffected by this fix — none is a blocker, all previously logged as non-blocking.
+
+---
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-010 is confirmed resolved: the fix is correct, matches `design.md` D3/D4/D7's intent, is narrowly scoped to the two affected call sites, is backed by regression tests for both of QA's original reproduction scenarios at both the unit and real-socket-integration level, and those tests correctly assert wire-level key presence (not a check an omitted field would also satisfy). No new issues found; nothing else regressed. QA-011 (Minor, `docs/PROTOCOL.md` staleness) remains open but was never in scope for this fix and should not block progress on its own — route it to `doc-writer` before `/opsx:archive`, per the original review's recommendation. This change is ready to proceed to `/verify` for hands-on hardware confirmation.
