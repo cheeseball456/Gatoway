@@ -9,6 +9,13 @@ export interface GatowayCoreConfig {
   wsPort: number;
   /** Path to the auth token file (design.md's "Trade-off" note; overridable per Open Questions). */
   tokenFilePath: string;
+  /**
+   * Path to the layout config file (persisted-layout-config design.md D2): per-plugin-
+   * type position-to-capability bindings, hand-authored JSON. Defaults alongside the
+   * auth token file in the same per-OS config directory; overridable via
+   * `GATOWAY_LAYOUT_FILE`, matching `GATOWAY_TOKEN_FILE`'s existing pattern.
+   */
+  layoutFilePath: string;
   /** Allowlisted WebSocket Origin values (design.md D5). Empty by default: fail closed. */
   allowedOrigins: readonly string[];
   /** Absolute path (including filename) of the active rotating log file. */
@@ -28,8 +35,9 @@ const DEFAULT_LOG_MAX_FILES = 5; // per design.md D6
 
 /**
  * The per-OS user config directory Gatoway core uses by default for the auth token
- * file, absent an explicit override (design.md's Trade-off note). Follows each
- * platform's conventional location; created on first run if missing.
+ * file and the layout config file, absent an explicit override (design.md's
+ * Trade-off note; persisted-layout-config design.md D2). Follows each platform's
+ * conventional location; created on first run if missing.
  */
 function defaultConfigDir(): string {
   const home = os.homedir();
@@ -88,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatowayCoreCon
     tcpPort: parseIntEnv(env.GATOWAY_TCP_PORT, DEFAULT_TCP_PORT),
     wsPort: parseIntEnv(env.GATOWAY_WS_PORT, DEFAULT_WS_PORT),
     tokenFilePath: env.GATOWAY_TOKEN_FILE ?? path.join(configDir, "auth-token"),
+    layoutFilePath: env.GATOWAY_LAYOUT_FILE ?? path.join(configDir, "layout.json"),
     allowedOrigins: parseAllowlist(env.GATOWAY_ALLOWED_ORIGINS),
     logFilePath: env.GATOWAY_LOG_FILE ?? path.join(logDir, "gatoway-core.log"),
     logMaxSizeBytes: parseIntEnv(env.GATOWAY_LOG_MAX_SIZE_BYTES, DEFAULT_LOG_MAX_SIZE_BYTES),

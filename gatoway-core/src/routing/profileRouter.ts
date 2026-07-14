@@ -114,7 +114,13 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
 
-    const capabilityId = this.layoutResolver.resolve(focusedId, payload.controller, payload.position);
+    // persisted-layout-config design.md D1: resolution is keyed by plugin type (the
+    // stable identity across reconnects), not connection id.
+    const capabilityId = this.layoutResolver.resolve(
+      focusedConnection.pluginType ?? "",
+      payload.controller,
+      payload.position,
+    );
     if (!capabilityId) {
       this.logger.info(
         {
@@ -215,7 +221,7 @@ export class ProfileRouter implements ProtocolRouter {
     }
 
     for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const boundCapabilityId = this.layoutResolver.resolve(connection.id, controller, position);
+      const boundCapabilityId = this.layoutResolver.resolve(connection.pluginType ?? "", controller, position);
       if (boundCapabilityId !== capabilityId) {
         continue;
       }
@@ -261,7 +267,11 @@ export class ProfileRouter implements ProtocolRouter {
   ): void {
     const focusedConnection = this.manager.get(focusedConnectionId);
     for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const capabilityId = this.layoutResolver.resolve(focusedConnectionId, controller, position);
+      const capabilityId = this.layoutResolver.resolve(
+        focusedConnection?.pluginType ?? "",
+        controller,
+        position,
+      );
       if (!capabilityId) {
         continue;
       }

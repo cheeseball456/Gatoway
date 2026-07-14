@@ -23,14 +23,20 @@ For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../R
 and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract
 (`register`, `focus`, `input_event`, `render_update`, `command`, `capability_update`),
 see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — this is the reference an application
-plugin author should build against. For the detailed capability specs this package
-implements, see
-[`openspec/changes/stream-deck-plugin-skeleton/specs/`](../openspec/changes/stream-deck-plugin-skeleton/specs/)
-and
-[`openspec/changes/focus-profile-routing/specs/`](../openspec/changes/focus-profile-routing/specs/)
-(`stream-deck-idle-display`'s delta spec — despite its name, this is now where the
-generic action model is specified; the original static-Idle requirements it once held
-were removed in favor of the generic Key/Dial requirements).
+plugin author should build against. What a connected application plugin's capabilities
+actually render as on a given key/dial is controlled by Gatoway core's local layout
+config file, not anything in this package — see
+[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md). For the detailed capability
+specs this package implements, see
+[`openspec/specs/stream-deck-core-client/`](../openspec/specs/stream-deck-core-client/),
+[`openspec/specs/stream-deck-core-lifecycle/`](../openspec/specs/stream-deck-core-lifecycle/),
+and [`openspec/specs/stream-deck-idle-display/`](../openspec/specs/stream-deck-idle-display/)
+(despite its name, `stream-deck-idle-display` is now where the generic action model —
+plus, as of `persisted-layout-config`'s QA-014 fix, the local default-baseline
+guarantee — is specified; the original static-Idle requirements it once held were
+removed in favor of the generic Key/Dial requirements). `persisted-layout-config`'s own
+delta to that spec is not yet consolidated at the time of writing; see
+[`openspec/changes/persisted-layout-config/specs/stream-deck-idle-display/spec.md`](../openspec/changes/persisted-layout-config/specs/stream-deck-idle-display/spec.md).
 
 ## Requirements
 
@@ -153,9 +159,14 @@ npm run manual:test-app-client --workspace=gatoway-core
 ```
 
 This connects to Gatoway core, registers as `pluginType: "test-app"` declaring a small
-fixture set of capabilities (two buttons, one dial — matching
-`gatoway-core/src/routing/testFixtureLayoutResolver.ts`'s hardcoded test layout), and
-then accepts commands typed at the prompt:
+fixture set of capabilities (two buttons, one dial), and then accepts commands typed at
+the prompt. **As of `persisted-layout-config`, these fixture capabilities only bind to a
+physical key/dial if Gatoway core's layout config file actually binds them** — the
+script's own header comment documents the exact config snippet to hand-author for its
+fixture ids; see [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the schema.
+Without a matching config, the script still connects and registers fine, but `focus`/
+`update` below simply have nothing bound to actually render on hardware (a safe no-op,
+not an error):
 
 - **`focus`** — reports `focused: true`. Should bind the test fixture's two keys and one
   dial on the real hardware, replacing the idle appearance.
@@ -255,10 +266,19 @@ sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of this change:
   a test-double application client (see
   [Exercising the mechanism without a real application plugin](#exercising-the-mechanism-without-a-real-application-plugin)
   above), since no real Lightroom/xDesign plugin exists yet.
-- **No persisted layout config yet.** Gatoway core currently resolves position →
-  capability bindings against an in-code test fixture
-  (`gatoway-core/src/routing/testFixtureLayoutResolver.ts`), not a real config file —
-  that's delivery-sequence step 6, a later change, not this one.
+- **Position → capability bindings are now real, file-backed config** (`persisted-layout-config`,
+  delivery-sequence step 6): Gatoway core loads a local JSON layout config file at
+  startup instead of an in-code test fixture. This package's own generic Key/Dial
+  actions are unaffected by that change — they still just render whatever `render_update`
+  they're told to — but a capability now only appears anywhere on the device if that
+  config file actually binds it to a position; see
+  [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md).
+- **A full plugin process restart applies a local default baseline immediately**
+  (`persisted-layout-config`'s QA-014 fix): if no remembered render state exists yet for
+  a position — e.g. right after a full plugin restart, before Gatoway core's own sweep
+  arrives — the generic Key/Dial actions now apply their manifest-declared default
+  label/icon locally, rather than showing an uninitialized-looking state indefinitely.
+  A subsequent real `render_update` still overrides this exactly as before.
 - **No auto-install of the generic actions.** See
   [Placing the generic actions](#placing-the-generic-actions-manual-one-time) above.
 - **No Property Inspector or settings UI** for the plugin.

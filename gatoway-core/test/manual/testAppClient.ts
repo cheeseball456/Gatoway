@@ -5,21 +5,44 @@
  *
  * No real second application plugin exists yet (Lightroom/xDesign are future changes -
  * proposal.md's "Out of scope"), so this script stands in for one: it connects to a
- * running Gatoway core, registers (declaring capabilities matching the test-fixture
- * layout - design.md D3, amended: a live capability is only rendered if the connection
- * itself has actually declared it), and lets a human toggle its focus state or push a
- * live capability update from stdin so the focus-tracking/profile-routing/capability-
- * update mechanism can be exercised end to end against real Stream Deck+ hardware
- * running the actual Stream Deck plugin (the real display client) - task 6.5's
- * manual/live-hardware verification.
+ * running Gatoway core, registers as pluginType "test-app" (declaring capabilities under
+ * the fixture ids below - design.md D3, amended: a live capability is only rendered if
+ * the connection itself has actually declared it), and lets a human toggle its focus
+ * state or push a live capability update from stdin so the focus-tracking/profile-
+ * routing/capability-update mechanism can be exercised end to end against real Stream
+ * Deck+ hardware running the actual Stream Deck plugin (the real display client) - task
+ * 6.5's manual/live-hardware verification.
+ *
+ * persisted-layout-config (tasks.md 4.4): since `testFixtureLayoutResolver.ts` was
+ * replaced by a real, file-backed layout, actually seeing a bound key/dial on real
+ * hardware now additionally requires a hand-authored layout config file (at the path
+ * `loadConfig().layoutFilePath` resolves to, or wherever `GATOWAY_LAYOUT_FILE` points)
+ * binding a "test-app" profile's positions to the capability ids below, e.g.:
+ * ```json
+ * {
+ *   "profiles": {
+ *     "test-app": {
+ *       "bindings": [
+ *         { "controller": "keypad", "position": { "row": 0, "column": 0 }, "capabilityId": "test-fixture.button.one" },
+ *         { "controller": "keypad", "position": { "row": 0, "column": 1 }, "capabilityId": "test-fixture.button.two" },
+ *         { "controller": "encoder", "position": { "index": 0 }, "capabilityId": "test-fixture.dial.one" }
+ *       ]
+ *     }
+ *   }
+ * }
+ * ```
+ * Without such a file (or with the wrong plugin type/positions/ids), Gatoway core still
+ * starts and this client still connects and registers fine - `focus`/`update` below
+ * simply have nothing bound to actually render (safe no-op, matching an unbound
+ * position generally).
  *
  * Usage (with Gatoway core already running, e.g. via the Stream Deck plugin or
  * `npm run dev --workspace=gatoway-core`):
  *   npm run manual:test-app-client --workspace=gatoway-core
  *
  * Once connected and registered, type at the prompt:
- *   focus    - report focused: true (should bind the test-fixture layout's two keys
- *              and one dial on the real hardware, per testFixtureLayoutResolver.ts)
+ *   focus    - report focused: true (should bind the layout config's two keys and one
+ *              dial on the real hardware, per whatever's configured for "test-app")
  *   blur     - report focused: false (should revert the hardware to the idle appearance,
  *              explicitly resetting icon rather than leaving a previous one stuck)
  *   update   - push a capability_update for "test-fixture.button.one" (should
@@ -40,7 +63,7 @@ import { encodeMessage } from "../../src/protocol/envelope.js";
 import type { Capability } from "../../src/protocol/messages.js";
 import { encodeNdjsonLine, NdjsonDecoder } from "../../src/protocol/tcpFraming.js";
 
-/** Matches `testFixtureLayoutResolver.ts`'s own fixture capability ids exactly. */
+/** Registered under pluginType "test-app" below; a layout config must bind these ids. */
 const FIXTURE_CAPABILITIES: Capability[] = [
   { id: "test-fixture.button.one", label: "Fixture A", type: "button" },
   { id: "test-fixture.button.two", label: "Fixture B", type: "button" },

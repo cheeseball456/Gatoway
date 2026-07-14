@@ -15,9 +15,13 @@ const CAP_ONE: Capability = { id: "cap.one", label: "One", type: "button", icon:
 
 /**
  * A small, fully-controllable LayoutResolver test double (independent of the real
- * fixture). Resolves to a capability *id* only (design.md D3, amended) - the live
- * `Capability` object itself always comes from whichever connection's own
- * `capabilities` array is being rendered, never from this resolver.
+ * config-backed implementation). Resolves to a capability *id* only (design.md D3,
+ * amended) - the live `Capability` object itself always comes from whichever
+ * connection's own `capabilities` array is being rendered, never from this resolver.
+ *
+ * Keyed by `pluginType` (persisted-layout-config design.md D1), not connection id - a
+ * falsy `pluginType` (e.g. a connection that never registered) resolves to `null`,
+ * matching the real config-backed resolver's behavior.
  */
 function fakeLayoutResolver(): LayoutResolver {
   const positions: PositionRef[] = [
@@ -25,8 +29,8 @@ function fakeLayoutResolver(): LayoutResolver {
     { controller: "encoder", position: { index: 0 } },
   ];
   return {
-    resolve(connectionId, controller, position) {
-      if (!connectionId) return null;
+    resolve(pluginType, controller, position) {
+      if (!pluginType) return null;
       if (controller === "keypad" && "row" in position && position.row === 0 && position.column === 0) {
         return CAP_ONE.id;
       }

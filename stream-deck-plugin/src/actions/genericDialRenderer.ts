@@ -17,9 +17,22 @@ export interface GenericDialLike {
 }
 
 /**
+ * The local default baseline applied when no remembered render state exists yet for a
+ * position (design.md D6, QA-014) - must match this action's own declared default state
+ * in `manifest.json` (`Actions[].States[0].Title`), currently `"Gatoway"`.
+ */
+export const GENERIC_DIAL_DEFAULT_LABEL = "Gatoway";
+
+/**
  * Applies the given render state to a dial instance. Only `label`/`icon` apply -
  * unlike keys, dials have no two-state (`setState`) concept in the Elgato SDK, so a
  * `render_update`'s `state` field is simply not applicable here.
+ *
+ * When no render state exists yet for this position, this applies a local default
+ * baseline immediately, independent of anything Gatoway core sends, for the same reason
+ * and with the same one-time-fallback guarantee as `genericKeyRenderer.ts`'s
+ * `renderGenericKey` - see that function's doc comment for the full explanation
+ * (design.md D6, QA-014).
  *
  * `icon` is handled the same way as `genericKeyRenderer.ts`'s `renderGenericKey`
  * (amended): `undefined` means never touch the image; `null` means explicitly reset to
@@ -30,7 +43,12 @@ export async function renderGenericDial(
   action: GenericDialLike,
   state: RenderState | undefined,
 ): Promise<void> {
-  if (!action.isDial() || !state) {
+  if (!action.isDial()) {
+    return;
+  }
+  if (!state) {
+    await action.setTitle(GENERIC_DIAL_DEFAULT_LABEL);
+    await action.setImage(undefined);
     return;
   }
   if (state.label !== undefined) {

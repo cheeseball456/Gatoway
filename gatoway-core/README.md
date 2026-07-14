@@ -7,27 +7,29 @@ connect into it over TCP or WebSocket, authenticate, and exchange a shared JSON 
 protocol.
 
 This package implements the connection/authentication/protocol/logging foundation
-(`gatoway-core-foundation`) plus, as of `focus-profile-routing`, focus tracking (which
-single connection, if any, currently has focus), profile routing (resolving physical
-Stream Deck input against the focused connection's bound capability and forwarding a
-`command`), and live capability display updates (`capability_update`). See
+(`gatoway-core-foundation`) plus focus tracking (which single connection, if any,
+currently has focus), profile routing (resolving physical Stream Deck input against the
+focused connection's bound capability and forwarding a `command`), live capability
+display updates (`capability_update`), and, as of `persisted-layout-config`, a real,
+file-backed layout config that determines which position resolves to which capability
+per plugin type (see [Layout config file](#layout-config-file) below). See
 [Current Scope and Limitations](#current-scope-and-limitations) for what is deliberately
 not yet built.
 
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
 and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract, see
 [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — the reference an application plugin
-author should build against, rather than this package's own source. For the detailed
-capability specs this package implements, see
-[`openspec/specs/`](../openspec/specs/)
+author should build against, rather than this package's own source. For the layout
+config file's schema, location, and a worked example, see
+[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md). For the detailed capability
+specs this package implements, see [`openspec/specs/`](../openspec/specs/)
 (`connection-management`, `plugin-authentication`, `message-protocol`,
-`diagnostics-logging`) — consolidated there after the `gatoway-core-foundation` change
-that introduced them was archived; see
-[`openspec/changes/archive/2026-07-13-gatoway-core-foundation/`](../openspec/changes/archive/2026-07-13-gatoway-core-foundation/)
-for that change's original proposal and design record, and
-[`openspec/changes/focus-profile-routing/`](../openspec/changes/focus-profile-routing/)
-for the focus-tracking/profile-routing/capability-update change (not yet archived at
-the time of writing).
+`diagnostics-logging`, `focus-tracking`, `profile-routing`, `stream-deck-idle-display`,
+`stream-deck-core-client`, `stream-deck-core-lifecycle`) — consolidated there once each
+introducing change is archived; see [`openspec/changes/archive/`](../openspec/changes/archive/)
+for those changes' original proposals and design records, and
+[`openspec/changes/persisted-layout-config/`](../openspec/changes/persisted-layout-config/)
+for the layout-persistence change (not yet archived at the time of writing).
 
 ## Requirements
 
@@ -89,6 +91,7 @@ the running instance.
 | `GATOWAY_WS_PORT` | `47822` | Port the WebSocket listener binds on `127.0.0.1` |
 | `GATOWAY_CONFIG_DIR` | Per-OS user config dir (see below) | Base directory for the auth token file, if `GATOWAY_TOKEN_FILE` isn't set |
 | `GATOWAY_TOKEN_FILE` | `<config dir>/auth-token` | Path to the auth token file (native/TCP plugins read this to authenticate) |
+| `GATOWAY_LAYOUT_FILE` | `<config dir>/layout.json` | Path to the layout config file (position-to-capability bindings, per plugin type); see [Layout config file](#layout-config-file) |
 | `GATOWAY_ALLOWED_ORIGINS` | *(empty — fail closed)* | Comma-separated list of allowlisted WebSocket `Origin` values (e.g. `chrome-extension://<id>`). No origins are allowed by default, so no WebSocket connection succeeds until this is set |
 | `GATOWAY_LOG_DIR` | Per-OS user log dir (see below) | Base directory for the log file, if `GATOWAY_LOG_FILE` isn't set |
 | `GATOWAY_LOG_FILE` | `<log dir>/gatoway-core.log` | Path to the active rotating log file |
@@ -119,6 +122,22 @@ spec](../openspec/specs/plugin-authentication/spec.md).
 
 WebSocket (browser-extension) connections do not use the token; they are checked
 instead against the `GATOWAY_ALLOWED_ORIGINS` allowlist at the HTTP-upgrade stage.
+
+### Layout config file
+
+At startup, Gatoway core also loads a local JSON layout config file (`layoutFilePath`
+above, `persisted-layout-config`) mapping physical Stream Deck positions to application
+capability ids, per plugin type — this is what actually determines what a connected
+plugin's declared capabilities render as on the device. It is read exactly once, at
+startup; hand-edit it and restart Gatoway core to pick up changes.
+
+A missing file (fresh install) or a malformed one is never fatal: Gatoway core starts
+with an empty layout (every position unbound) either way, and logs a clear message
+identifying what happened and, for a missing file, the expected path. See
+[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the full JSON schema, the
+missing/malformed-file log events, and a worked example — this is the reference a
+developer hand-authoring a config for a real application plugin (Lightroom, xDesign, or
+this package's own manual test-app client) needs.
 
 ## Manual test clients
 
@@ -153,11 +172,19 @@ plugin connected as the display client:
 npm run manual:test-app-client
 ```
 
-It registers a small fixture set of capabilities (matching
-`src/routing/testFixtureLayoutResolver.ts`'s hardcoded test layout) and accepts
-`focus` / `blur` / `update` / `quit` commands typed at the prompt — see
+It registers a small fixture set of capabilities under `pluginType: "test-app"` and
+accepts `focus` / `blur` / `update` / `quit` commands typed at the prompt — see
 [`stream-deck-plugin/README.md`](../stream-deck-plugin/README.md#exercising-the-mechanism-without-a-real-application-plugin)
 for the full walkthrough of what each command does.
+
+**These fixture capabilities only render on a physical key/dial if a layout config binds
+them to a position** — as of `persisted-layout-config`, position → capability bindings
+come from the real layout config file (see [Layout config file](#layout-config-file)
+above), not a hardcoded fixture. `test/manual/testAppClient.ts`'s own header comment
+documents the exact config snippet to hand-author for its fixture ids; without it (or
+with the wrong plugin type/positions/ids), the script still connects and registers fine,
+but `focus`/`update` simply have nothing bound to actually display — a safe no-op, not
+an error.
 
 ## Message protocol
 
@@ -192,11 +219,10 @@ The full message set, as of `focus-profile-routing`:
 See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full reference — envelope,
 every payload shape, the `icon` field's null-vs-omitted reset semantics, and practical
 icon/label content guidance — rather than the abbreviated summary above. The
-[`message-protocol` spec](../openspec/specs/message-protocol/spec.md) covers only the
-original `register`/`register_ack`/`error` set from `gatoway-core-foundation`; the five
-message types added by `focus-profile-routing` are specified in that change's own
-[`specs/message-protocol/spec.md`](../openspec/changes/focus-profile-routing/specs/message-protocol/spec.md)
-until the change is archived and consolidated.
+[`message-protocol` spec](../openspec/specs/message-protocol/spec.md) now covers the
+full message set, consolidated after both `gatoway-core-foundation` (the original
+`register`/`register_ack`/`error` set) and `focus-profile-routing` (the five message
+types added since) were archived.
 
 ## Logging
 
@@ -219,8 +245,9 @@ npm run typecheck  # tsc --noEmit
 ## Current scope and limitations
 
 This package now implements the core foundation (`gatoway-core-foundation`, the first
-change in Gatoway's delivery sequence) plus focus tracking, profile routing, and live
-capability updates (`focus-profile-routing`, delivery-sequence step 4; see
+change in Gatoway's delivery sequence), focus tracking, profile routing, and live
+capability updates (`focus-profile-routing`, delivery-sequence step 4), and a real,
+file-backed layout config (`persisted-layout-config`, delivery-sequence step 6; see
 `../ARCHITECTURE.md`'s Delivery Sequence). As of the most recent change:
 
 - **A Stream Deck plugin now exists** ([`../stream-deck-plugin/`](../stream-deck-plugin/))
@@ -238,12 +265,17 @@ capability updates (`focus-profile-routing`, delivery-sequence step 4; see
   of its own already-declared capabilities at any time after registration, and Gatoway
   core immediately re-renders it on the Stream Deck if that connection is currently
   focused (`REQUIREMENTS.md` FR-001).
-- **No persisted layout config yet.** Position → capability bindings are resolved
-  against an in-code test fixture (`src/routing/testFixtureLayoutResolver.ts`), not a
-  real config file — that's delivery-sequence step 6, a later change.
+- **Position → capability bindings are now real, file-backed config**, not an in-code
+  fixture. Gatoway core loads a local JSON layout config file at startup, keyed by
+  plugin type — see [Layout config file](#layout-config-file) above and
+  [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the schema and a worked
+  example. Only reading/loading is wired into Gatoway core's own startup; the
+  write path (`LayoutStore.setBinding()`/`removeBinding()`/`save()`) exists but has no
+  caller yet — it's forward-looking API surface for a future no-code mapping UI
+  (post-MVP, undesigned).
 - **No real application plugins exist yet** (no Lightroom adapter, no xDesign/xDender
-  browser extension) — `focus-profile-routing` proves the mechanism using a manual
-  test-double client (`test/manual/testAppClient.ts`; see
+  browser extension) — `focus-profile-routing`/`persisted-layout-config` prove the
+  mechanism using a manual test-double client (`test/manual/testAppClient.ts`; see
   [Manual test clients](#manual-test-clients)) and live verification against real
   Stream Deck+ hardware, not a real second application.
 

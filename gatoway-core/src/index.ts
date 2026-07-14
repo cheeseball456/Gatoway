@@ -8,7 +8,8 @@ import { ConnectionManager } from "./connection/connectionManager.js";
 import { startTcpListener, type TcpListenerHandle } from "./connection/tcpListener.js";
 import { startWsListener, type WsListenerHandle } from "./connection/wsListener.js";
 import { FocusTracker } from "./focus/focusTracker.js";
-import { createTestFixtureLayoutResolver } from "./routing/testFixtureLayoutResolver.js";
+import { createLayoutResolver } from "./routing/configLayoutResolver.js";
+import { LayoutStore } from "./routing/layoutStore.js";
 import { ProfileRouter } from "./routing/profileRouter.js";
 
 export type { GatowayCoreConfig } from "./config.js";
@@ -35,7 +36,9 @@ export type {
 export { FocusTracker } from "./focus/focusTracker.js";
 export type { FocusChangeEvent, FocusChangeReason } from "./focus/focusTracker.js";
 export type { LayoutResolver, PositionRef } from "./routing/layoutResolver.js";
-export { createTestFixtureLayoutResolver } from "./routing/testFixtureLayoutResolver.js";
+export { createLayoutResolver } from "./routing/configLayoutResolver.js";
+export { LayoutStore } from "./routing/layoutStore.js";
+export type { LayoutBinding, LayoutConfigFile, LayoutProfileConfig } from "./routing/layoutConfig.js";
 export { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "./routing/profileRouter.js";
 
 export interface GatowayCoreHandle {
@@ -44,6 +47,12 @@ export interface GatowayCoreHandle {
   readonly logger: Logger;
   /** Tracks which connection (if any) currently has focus (focus-tracking capability). */
   readonly focusTracker: FocusTracker;
+  /**
+   * Owns the loaded layout config (layout-persistence capability): read access backs
+   * `profileRouter`'s resolution; `setBinding`/`removeBinding`/`save()` are unused by
+   * this change but exposed here as the API surface a future no-code mapping UI needs.
+   */
+  readonly layoutStore: LayoutStore;
   /** Resolves input_events and drives render_updates (profile-routing capability). */
   readonly profileRouter: ProfileRouter;
   /** The loopback addresses/ports actually bound by the TCP and WebSocket listeners. */
@@ -98,12 +107,14 @@ export async function startGatowayCore(
 
   const manager = new ConnectionManager(logger);
 
-  // focus-tracking / profile-routing (design.md D2-D4): the test-fixture layout is
-  // deliberately temporary - see testFixtureLayoutResolver.ts's own doc comment. Step 6
-  // (ARCHITECTURE.md's delivery sequence) swaps it for a config-file-backed resolver
-  // behind the same LayoutResolver interface.
+  // layout-persistence (persisted-layout-config design.md D4/D5): load() never throws -
+  // a missing or malformed config file logs a clear message and falls back to an empty
+  // in-memory layout (every position unbound), rather than aborting startup.
+  const layoutStore = new LayoutStore({ filePath: config.layoutFilePath, logger });
+  await layoutStore.load();
+
   const focusTracker = new FocusTracker(logger);
-  const layoutResolver = createTestFixtureLayoutResolver();
+  const layoutResolver = createLayoutResolver(layoutStore);
   const profileRouter = new ProfileRouter({ manager, focusTracker, layoutResolver, logger });
   manager.onDisconnect((record) => profileRouter.handleDisconnect(record.id));
 
@@ -133,6 +144,7 @@ export async function startGatowayCore(
     manager,
     logger,
     focusTracker,
+    layoutStore,
     profileRouter,
     tcpAddresses: tcpHandle.addresses,
     wsAddresses: wsHandle.addresses,

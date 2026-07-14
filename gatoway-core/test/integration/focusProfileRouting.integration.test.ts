@@ -1,18 +1,22 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { connect, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import pino from "pino";
 import { ConnectionManager } from "../../src/connection/connectionManager.js";
 import { startTcpListener, type TcpListenerHandle } from "../../src/connection/tcpListener.js";
 import { FocusTracker } from "../../src/focus/focusTracker.js";
-import { createTestFixtureLayoutResolver } from "../../src/routing/testFixtureLayoutResolver.js";
+import { createLayoutResolver } from "../../src/routing/configLayoutResolver.js";
+import { LayoutStore } from "../../src/routing/layoutStore.js";
 import { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "../../src/routing/profileRouter.js";
 import { encodeMessage, type GatowayMessage } from "../../src/protocol/envelope.js";
 import type { Capability } from "../../src/protocol/messages.js";
 import { encodeNdjsonLine, NdjsonDecoder } from "../../src/protocol/tcpFraming.js";
 
 /**
- * The test-fixture layout resolver (`testFixtureLayoutResolver.ts`) only ever binds
+ * The config-backed layout resolver (`configLayoutResolver.ts`) only ever binds
  * capability *ids* to positions (design.md D3, amended) - a test-double app connection
  * must actually declare capabilities under these same ids for the bound layout sweep
  * and resolved commands to carry any real data, exactly as a real application plugin
@@ -23,6 +27,29 @@ const FIXTURE_CAPABILITIES: Capability[] = [
   { id: "test-fixture.button.two", label: "Fixture B", type: "button", icon: "fixture-b.png" },
   { id: "test-fixture.dial.one", label: "Fixture Dial", type: "dial" },
 ];
+
+/**
+ * The same three bindings, applied identically to every plugin type this suite's
+ * test-double connections register as (persisted-layout-config's replacement for
+ * `testFixtureLayoutResolver.ts`, tasks.md 4.3): several tests below have two distinct
+ * connections/plugin types (`test-app-a`/`test-app-b`) superseding each other's focus,
+ * so each needs its own identically-bound profile in the hand-authored test config.
+ */
+const FIXTURE_BINDINGS = [
+  { controller: "keypad", position: { row: 0, column: 0 }, capabilityId: "test-fixture.button.one" },
+  { controller: "keypad", position: { row: 0, column: 1 }, capabilityId: "test-fixture.button.two" },
+  { controller: "encoder", position: { index: 0 }, capabilityId: "test-fixture.dial.one" },
+];
+
+const FIXTURE_PLUGIN_TYPES = ["test-app", "test-app-a", "test-app-b"];
+
+function buildFixtureLayoutConfig() {
+  const profiles: Record<string, { bindings: typeof FIXTURE_BINDINGS }> = {};
+  for (const pluginType of FIXTURE_PLUGIN_TYPES) {
+    profiles[pluginType] = { bindings: FIXTURE_BINDINGS };
+  }
+  return { profiles };
+}
 
 /**
  * Integration test using test-double TCP connections (tasks.md 6.3): no real second
@@ -111,6 +138,7 @@ class TestDoubleClient {
 
 describe("focus tracking + profile routing (integration)", () => {
   let handle: TcpListenerHandle | undefined;
+  let configDir: string | undefined;
   const clients: TestDoubleClient[] = [];
 
   afterEach(async () => {
@@ -119,6 +147,10 @@ describe("focus tracking + profile routing (integration)", () => {
     }
     await handle?.close();
     handle = undefined;
+    if (configDir) {
+      await rm(configDir, { recursive: true, force: true });
+      configDir = undefined;
+    }
   });
 
   async function start(): Promise<{ port: number; token: string }> {
@@ -127,7 +159,17 @@ describe("focus tracking + profile routing (integration)", () => {
     const logger = silentLogger();
     const manager = new ConnectionManager(logger);
     const focusTracker = new FocusTracker(logger);
-    const layoutResolver = createTestFixtureLayoutResolver();
+
+    // persisted-layout-config, tasks.md 4.3: a real, test-authored layout config file
+    // replaces the deleted `testFixtureLayoutResolver.ts`, loaded through the real
+    // `LayoutStore`/`createLayoutResolver` this change builds.
+    configDir = await mkdtemp(join(tmpdir(), "gatoway-focus-profile-routing-"));
+    const layoutFilePath = join(configDir, "layout.json");
+    await writeFile(layoutFilePath, JSON.stringify(buildFixtureLayoutConfig()), "utf8");
+    const layoutStore = new LayoutStore({ filePath: layoutFilePath, logger });
+    await layoutStore.load();
+    const layoutResolver = createLayoutResolver(layoutStore);
+
     const router = new ProfileRouter({ manager, focusTracker, layoutResolver, logger });
     manager.onDisconnect((record) => router.handleDisconnect(record.id));
 

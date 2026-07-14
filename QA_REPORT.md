@@ -765,3 +765,171 @@ Every core mechanism this change introduces was confirmed live, on real hardware
 ## Review Verdict (this session)
 
 **Recommendation:** ✅ **Pass** — Every mechanism this change introduces is confirmed working correctly on real hardware, including the two QA fix cycles that preceded this session (QA-006/007/008 areas untouched and still sound; QA-010's icon-reset fix specifically re-verified live via real log payloads, not just automated tests). One new Minor, non-blocking, documentation-only finding (QA-012) — groups with the already-open QA-011 for a single `doc-writer` pass covering both `docs/PROTOCOL.md` gaps (missing `capability_update` section, and now label-length guidance) before `/opsx:archive`.
+
+---
+---
+
+# Static Review Session — 2026-07-14 — `persisted-layout-config`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `persisted-layout-config` (branch `persisted-layout-config`, HEAD `1e45399`) — the new `layout-persistence` capability replacing `focus-profile-routing`'s in-code `testFixtureLayoutResolver.ts` with a real, file-backed `LayoutStore`/`LayoutResolver` (`gatoway-core/src/routing/layoutConfig.ts`, `layoutStore.ts`, `layoutResolver.ts`, `configLayoutResolver.ts`, `position.ts`), the mechanical `ProfileRouter`/`config.ts`/`index.ts` wiring changes this required, and the deletion of the fixture and its test. Reviewed against `proposal.md`, `design.md` (D1-D5), the new `layout-persistence` capability spec, `tasks.md`, `REQUIREMENTS.md`, and `ARCHITECTURE.md` (delivery-sequence step 6, R-3). Full test suite (120 gatoway-core + 61 stream-deck-plugin = 181 tests) and both packages' typecheck were re-run and pass. I additionally wrote three throwaway, uncommitted verification tests (deleted before finishing this session, none left in the tree) to independently confirm behavior rather than relying on the implementation's or `tasks.md`'s own claims: (1) a fault-injected `LayoutStore.save()` test simulating a failed `writeFile` and a failed `rename` via `vi.mock("node:fs/promises", ...)`, (2) an end-to-end `ProfileRouter` + real `LayoutStore`/`createLayoutResolver` test using two genuinely disjoint, non-overlapping profiles (one of which never even connects) to directly exercise design.md D3's idle-reset requirement, and (3) manual tracing of the `pluginType ?? ""` fallback at all three `ProfileRouter` call sites against `configLayoutResolver.ts`'s actual guard.
+
+## Summary
+
+This is a clean, well-scoped implementation with no Critical or Major issues. Every area this review was specifically asked to scrutinize checks out under direct testing, not just code reading. The `connection.pluginType ?? ""` fallback used at all three `ProfileRouter` call sites (`handleInputEvent`, `handleCapabilityUpdate`, `sendBoundLayoutSweep`) cannot accidentally resolve to a real bound profile: `configLayoutResolver.ts`'s `resolve()` short-circuits with an explicit `if (!pluginType) return null` before ever consulting the store, so even a config file with a (currently unvalidated, but harmless) profile literally keyed `""` could never be reached this way — confirmed both by code trace and by the existing "returns null for a falsy plugin type" unit test. `LayoutStore.allPositions()` genuinely unions across every configured profile, not just one: I independently verified this with a fault-injected, from-scratch test using two completely disjoint profiles (no shared positions at all) where one profile's connection never even connects, and confirmed the idle sweep still resets both profiles' positions after the other one blurs — design.md D3's specific concern is not just claimed correct, it's proven correct end-to-end through the real `ProfileRouter`. Missing-file, invalid-JSON, and wrong-shape config handling all fail safe with distinct log events (`layout_config_missing`/`layout_config_invalid_json`/`layout_config_invalid_shape`) and an empty in-memory layout, traced directly through `LayoutStore.load()`'s three separate catch/validation branches — no crash path exists. `save()`'s atomic write genuinely protects the on-disk file: I forced both a `writeFile` failure and a `rename` failure via mocking, and in both cases the previously-saved `layout.json` was left byte-for-byte intact and valid — the core atomicity guarantee design.md D5 and the spec's "Save writes atomically" scenario require holds under actual fault injection, not just the happy-path round-trip the existing test suite exercises. The unused `save()`/`setBinding()`/`removeBinding()` API surface built for the future no-code UI is small and sound: no bugs found in its position-equality-aware set/replace/remove logic.
+
+One real, if narrow, gap surfaced from the fault-injection testing: a failed `rename()` during `save()` leaves an orphaned `.tmp` file behind in the config directory forever, since nothing cleans it up on the error path — the main config file itself is never corrupted (the requirement that actually matters), but this is a real, untested resource-leak gap in code nothing calls yet, worth closing before a future caller (the no-code UI) relies on `save()` under real-world failure conditions. See QA-013 (Minor).
+
+A second, non-blocking Observation: the `focus-profile-routing` integration test suite's replacement fixture (`FIXTURE_BINDINGS`) applies byte-for-byte identical bindings to all three plugin-type profiles it configures (`test-app`/`test-app-a`/`test-app-b`), so it never exercises design.md D3's specific "a position bound only in a different, non-focused profile is still reset by the idle sweep" scenario at the full `ProfileRouter`-plus-real-TCP-socket level — only the dedicated `LayoutStore`/`configLayoutResolver` unit tests exercise genuinely distinct multi-profile bindings. I confirmed (via my own throwaway test, see Scope above) that the actual behavior is correct end-to-end, so this is a coverage gap, not a functional bug — but it's exactly the scenario design.md D3 calls out as consequential to get wrong, so it's worth a dedicated regression test at the integration level too, not just at the unit level.
+
+Everything else reviewed — the config schema/validation (`layoutConfig.ts`), `position.ts`'s keypad-vs-encoder discrimination (correctly prevents `{row:0,column:0}` and `{index:0}` from colliding), `config.ts`'s `GATOWAY_LAYOUT_FILE` wiring, `index.ts`'s startup sequencing (`layoutStore.load()` awaited before `createLayoutResolver`/`ProfileRouter` construction, matching the existing non-aborting resilience posture for the token file), and the mechanical `ProfileRouter` call-site updates (`pluginType` instead of `connectionId`, threaded through all three resolution call sites) — is sound and consistent with `design.md`'s D1-D5 decisions.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-013 | Minor | `gatoway-core/src/routing/layoutStore.ts:160-171` (`LayoutStore.save()`) | A failed `rename()` during `save()` leaves an orphaned `<file>.<uuid>.tmp` file behind in the config directory with no cleanup; the target config file itself is never corrupted (confirmed by fault injection), but repeated failures accumulate stray temp files indefinitely. Untested by the existing suite (which only exercises the happy path). | Resolved (commit `84d293c`) |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+
+---
+
+## Issue Detail
+
+### QA-013 · Minor · `gatoway-core/src/routing/layoutStore.ts:160-171`
+
+**What:** `LayoutStore.save()` writes the serialized config to a temp file (`${this.filePath}.${randomUUID()}.tmp`), then `rename()`s it over the target path:
+```ts
+async save(): Promise<void> {
+  const config: LayoutConfigFile = { profiles: {} };
+  for (const [pluginType, bindings] of this.profiles.entries()) {
+    config.profiles[pluginType] = { bindings: [...bindings] };
+  }
+
+  const dir = dirname(this.filePath);
+  await mkdir(dir, { recursive: true });
+  const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
+  await writeFile(tempPath, JSON.stringify(config, null, 2), "utf8");
+  await rename(tempPath, this.filePath);
+}
+```
+There is no `try`/`catch`/`finally` around either the `writeFile` or the `rename` call, so if `rename()` throws (e.g. a cross-device rename on some filesystem layouts, a permissions error, or a concurrent process holding a lock on the target), the freshly-written temp file is never removed — it simply stays on disk, and the exception propagates to the caller with no cleanup having occurred.
+
+**Scenario:** A future caller (the no-code mapping UI design.md D5 builds this API surface for) calls `setBinding()`/`removeBinding()` then `save()`, and the `rename()` step fails for any of the reasons above. The user-visible edit attempt fails (correctly — the exception does propagate, so the caller can report the failure), but every such failure leaves one more `layout.json.<uuid>.tmp` file behind in the config directory, forever, since nothing else in this codebase ever cleans up files matching that pattern.
+
+**Evidence:** I wrote a temporary, uncommitted test (`gatoway-core/test/unit/tmpAtomicWrite.test.ts`, removed before finishing this session) that mocked `node:fs/promises` via `vi.mock(..., async (importOriginal) => ...)` to force a real `rename()` rejection on an otherwise-real `LayoutStore.save()` call, seeded with a pre-existing valid `layout.json`. Result: the pre-existing `layout.json` remained byte-for-byte intact (confirming the core atomicity guarantee holds — this is the good news), but `readdir(dir)` after the failed save showed both `layout.json` and a leftover `layout.json.e9edec90-ced6-4639-9085-4d6751d4f9d5.tmp` file. The equivalent fault injection on `writeFile()` itself (rather than `rename()`) left no stray file, since the temp file is never created if `writeFile` itself throws before completing.
+
+**Impact:** Low on its own — the requirement that actually matters (the previously-saved config is never corrupted or left partially written) is genuinely met, confirmed under fault injection, not just the happy-path round-trip the existing test suite covers. But this is a real, unbounded resource leak on a real (if currently rare) failure path, and it's completely untested — nothing in `layoutStore.test.ts` exercises a `rename()` failure at all. Since nothing calls `save()` yet in this change (design.md D5's own framing), this has zero user-visible impact today, but the future no-code UI this API is explicitly built for will be the first real caller, and repeated failed save attempts (e.g. a user's disk genuinely full, or a permissions issue on the config directory) would otherwise accumulate garbage files silently.
+
+**Suggested fix direction:** The outcome needed is that a failed `save()` leaves the config directory exactly as it found it — no stray temp files — in addition to (already true) never corrupting the target file. A `try`/`finally` (or equivalent) around the write-then-rename sequence that attempts to remove the temp file on any failure (itself best-effort — a cleanup failure shouldn't mask the original error) would close this without changing the atomicity guarantee that's already correctly implemented.
+
+**Root-cause level:** Code. `design.md` D5's intent ("a crash mid-write can never leave a corrupted config file") is correctly implemented for the file that matters; this is a narrower, adjacent gap (temp-file cleanup on the failure path) that the design didn't explicitly call out either way.
+
+---
+
+## Areas Specifically Verified (per review scope)
+
+- **`pluginType ?? ""` fallback cannot accidentally match a real bound profile:** Confirmed by direct code trace and independent reasoning about the config schema. All three `ProfileRouter` call sites (`profileRouter.ts:119-123`, `:224`, `:270-274`) pass `connection.pluginType ?? ""` (or `focusedConnection?.pluginType ?? ""`) to `layoutResolver.resolve()`. `configLayoutResolver.ts:14-17`'s `resolve()` begins with `if (!pluginType) { return null; }`, which is checked *before* any lookup into the store — so an empty string can never reach `store.getProfile(pluginType)` at all, regardless of whether a hand-authored (or malicious) config file happens to contain a profile keyed `""` (which `validateLayoutConfig` does not explicitly reject, but is rendered moot by this guard). I confirmed `pluginType` really can be `""` in practice, not just `undefined`: `messageHandler.ts:89`'s `register` handling only substitutes the literal string `"unknown"` when `payload.pluginType` is not a `string` at all (e.g. missing or wrong type) — an explicitly-sent `pluginType: ""` is stored verbatim on the connection record — but this makes no difference to the outcome, since the guard in `configLayoutResolver.ts` treats both cases (`undefined` defaulted to `""`, and a genuine stored `""`) identically and safely. No security or correctness issue found here.
+- **`allPositions()` unions across ALL configured profiles, not just one:** Confirmed both by the existing unit tests (`layoutStore.test.ts`'s "unions distinct positions across every configured profile", `configLayoutResolver.test.ts`'s equivalent) and by my own independent, from-scratch verification test using two entirely disjoint profiles (`app-a` bound only at `keypad(0,0)`, `app-b` bound only at `encoder(9)`, `app-b` never even connecting) driven through the real `ProfileRouter` + real `LayoutStore`/`createLayoutResolver`. After `app-a` gains and then loses focus, the idle sweep correctly reset both `keypad(0,0)` (app-a's position) and `encoder(9)` (app-b's position, never focused, never connected) — exactly the design.md D3 concern this review was asked to specifically confirm rather than trust. No bug found.
+- **Missing-file, invalid-JSON, and wrong-shape config handling fail safe:** Confirmed by tracing `LayoutStore.load()`'s three separate `catch`/validation branches directly (`layoutStore.ts:44-95`): an `ENOENT` on `readFile` logs `layout_config_missing` at `info` level with the expected path and a pointer to the schema location; any other `readFile` error logs `layout_config_read_failed` at `error`; a `JSON.parse` throw logs `layout_config_invalid_json` at `error` with the parse error message; a shape validation failure (`validateLayoutConfig`) logs `layout_config_invalid_shape` at `error` with a specific, localized reason string (e.g. `profiles.lightroom.bindings[0].capabilityId must be a non-empty string`). All four paths set `this.profiles = new Map()` and return normally — no path re-throws or rejects past `load()`, so `startGatowayCore()`'s `await layoutStore.load()` (`index.ts:114`) can never fail startup because of a layout config problem. Confirmed via the existing test suite (all four scenarios directly tested) and by reading every line of `load()`, not just its tested branches.
+- **`LayoutStore.save()`'s atomic write behavior under simulated failure:** Confirmed the core guarantee holds — see QA-013 above for the one gap found (temp-file cleanup on failure) and the fault-injection method used to confirm the target file is never corrupted even when the write-then-rename sequence fails partway.
+- **`save()`/`setBinding()`/`removeBinding()` API soundness for a future caller:** Confirmed sound. `setBinding()` and `removeBinding()` both use `samePosition()` (`position.ts`) for controller/position equality, which correctly distinguishes a keypad `{row:0,column:0}` from an encoder `{index:0}` even when numeric fields coincide — the exact class of bug that would otherwise silently corrupt bindings for the wrong controller type. `setBinding()` replaces an existing binding at the same controller/position rather than duplicating it (confirmed by existing test and by reading the `findIndex`/splice-equivalent logic); `removeBinding()` on a plugin type with no profile is a safe no-op, not a throw (confirmed by existing test). No bug found beyond QA-013's narrower cleanup gap in `save()` itself.
+
+---
+
+## Observations
+
+- `focus-profile-routing`'s integration test suite (`focusProfileRouting.integration.test.ts`) applies identical `FIXTURE_BINDINGS` to all three plugin-type profiles it configures (`test-app`/`test-app-a`/`test-app-b`), so it never exercises design.md D3's "position bound only in a different profile" idle-reset scenario at the full `ProfileRouter`-plus-real-socket integration level — only the dedicated unit-level tests (`layoutStore.test.ts`, `configLayoutResolver.test.ts`) use genuinely distinct, non-overlapping multi-profile bindings. I independently confirmed the actual behavior is correct end-to-end (see "Areas Specifically Verified" above), so this is a coverage gap rather than a functional bug, but given this is the exact scenario design.md D3 flags as consequential to get wrong, a dedicated regression test at the integration level (two distinct plugin types with disjoint bindings, one of which never focuses) would close the gap and guard against a future regression that the current fixture's overlapping bindings would not catch.
+- `validateLayoutConfig` (`layoutConfig.ts`) does not reject a profile keyed by the empty string (`""`) in the config file's JSON — this is currently harmless (see "Areas Specifically Verified" above: `configLayoutResolver.ts`'s `resolve()` guard makes such a profile permanently unreachable regardless), but a stricter validator could reject it outright as a clearer signal to whoever hand-authors the file that an empty plugin-type key can never be bound to anything. Not a defect; a minor validation-completeness note only.
+- No schema/versioning strategy exists yet for the layout config file — this is already tracked as `ARCHITECTURE.md`'s R-3 ("Layout config file has no schema-migration/versioning strategy yet... revisit before any public release") and is correctly out of scope for this change; noting only that this review's findings don't change that assessment.
+- No dedicated documentation section exists yet describing the layout config file's JSON schema for a hand-authoring developer (design.md D4 anticipates this living in `docs/PROTOCOL.md` "or a dedicated layout-config doc section, left to doc-writer"). Not a code defect — correctly deferred to `doc-writer` per this change's own design — but worth ensuring it's actually picked up before `/opsx:archive`, alongside the already-open `docs/PROTOCOL.md` gaps from the `focus-profile-routing` review (QA-011/QA-012).
+
+---
+
+## Testing Coverage Assessment
+
+`gatoway-core`'s new tests (`layoutStore.test.ts`, `configLayoutResolver.test.ts`, plus the updated `focusProfileRouting.integration.test.ts` and `profileRouter.test.ts`) are thorough and well-targeted: valid-load, missing-file, invalid-JSON, wrong-shape (including a field-level validation failure), `allPositions()` union/dedup across genuinely distinct profiles, `setBinding`/`removeBinding` (including no-op-on-unknown-plugin-type and replace-not-duplicate semantics), save-then-reload round-trip, and a "no temp file left behind, valid JSON always" happy-path atomic-write test are all directly covered. `configLayoutResolver.test.ts` explicitly tests the falsy-`pluginType`-returns-null guard and cross-profile-no-contamination. `tasks.md` 4.3's claim (existing `focus-profile-routing` tests updated to use a real, test-authored config file) is accurate — I confirmed the old fixture file and its test were both deleted (`git diff --stat main..persisted-layout-config` shows `testFixtureLayoutResolver.ts`/`testFixtureLayoutResolver.test.ts` both removed, `git log` shows this is a single clean commit) and no stale references to either remain anywhere in `src/` or `test/`.
+
+Two gaps, both already covered above: QA-013 (no test exercises a `rename()`/`writeFile()` failure during `save()` — the existing suite only covers the happy path) and the Observation regarding the integration suite's identical-bindings-across-profiles fixture masking the full-stack D3 scenario (correct behavior confirmed independently, but not by any test that ships with this change).
+
+Task 4.4's manual verification is honestly and accurately disclosed in `tasks.md`: the missing/invalid-JSON/wrong-shape fallback and end-to-end TCP resolution were confirmed against a real, standalone-launched Gatoway core process (not just the test suite), while visual confirmation on real Stream Deck+ hardware is correctly marked as deferred (unchecked) pending physical device access, consistent with this project's established pattern for hardware-dependent checks (e.g. `stream-deck-plugin-skeleton`'s task 5.3).
+
+---
+
+## Review Verdict
+
+**Recommendation:** ✅ **Pass** — No Critical or Major issues found. Every area this review was specifically asked to scrutinize checks out under direct, independent fault-injection/end-to-end testing rather than static trust in the implementation's own claims: the `pluginType ?? ""` fallback cannot accidentally resolve a real bound profile (confirmed by trace and by the fact that config-side empty-string profile keys are also unreachable), `allPositions()` genuinely unions across all configured profiles (confirmed with a from-scratch, disjoint two-profile test through the real `ProfileRouter`), missing/invalid/malformed config handling all fail safe with distinct log events and no crash path, and `save()`'s atomic write genuinely protects the target file from corruption under simulated `writeFile`/`rename` failures. One Minor, code-level finding (QA-013: a failed `rename()` during `save()` leaks a temp file, though the target file itself is never corrupted) and one non-blocking testing-coverage Observation (the `focus-profile-routing` integration fixture's identical cross-profile bindings mask the full-stack D3 scenario, independently confirmed correct by this review) are open but do not block progress — the architect may schedule QA-013 whenever `save()` gets its first real caller (the no-code UI), since nothing in this change invokes it yet. This change is ready for `/verify` (including the still-deferred real-hardware visual confirmation from task 4.4) and, following that, `doc-writer` (to add the layout config schema documentation design.md D4 anticipates, alongside the already-open `docs/PROTOCOL.md` gaps from the prior review) and `/opsx:archive`.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of `persisted-layout-config` (branch `persisted-layout-config`, commit `84d293c`) against real Elgato Stream Deck+ hardware, using a hand-authored `layout.json` at the real default config path and the existing `testAppClient.ts` test double.
+
+## Summary
+
+The core mechanism this change introduces — real, config-file-driven position-to-capability binding, keyed by plugin type — is confirmed working correctly end to end on real hardware: a hand-authored two-profile config loaded correctly, resolved correctly through the real Stream Deck plugin for a live test-app connection, and correctly left an unrelated profile's position untouched. Critically, task 4.4's deferred real-hardware verification of D3 (the position union across all configured profiles) was confirmed live and unusually convincingly: a fourth key, bound only under a plugin type that never once connected, correctly showed the idle appearance from the moment Gatoway core started — direct proof `allPositions()` genuinely spans every configured profile, not just ones with active connections.
+
+However, testing the missing-config fallback path surfaced a new, real gap: a **Major, design-level** finding (QA-014) where a full Stream Deck plugin process restart combined with a missing/empty layout config leaves an already-placed dial action stuck showing an uninitialized-looking title indefinitely, with nothing to correct it.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-014 | Major | Interaction between `persisted-layout-config` D4 and `focus-profile-routing` D5 | A full Stream Deck plugin restart with a missing/empty layout config leaves already-placed actions in an inconsistent, uncorrected visual state indefinitely — confirmed live: the dial showed "Dial" (its manifest `Name`, not its declared default `Title` of "Gatoway") and stayed that way | Open |
+
+## Issue Detail
+
+### QA-014 · Major · Design-level gap (D4 × D5 interaction)
+
+**What:** `persisted-layout-config`'s D4 decision — "missing config file: Gatoway core runs with zero bindings, `allPositions()` returns an empty list" — combined with `focus-profile-routing`'s D5 persistence mechanism (the Stream Deck plugin remembers "last known render state" per position, purely in-memory, applied on `onWillAppear`) has a gap neither decision's scope covered: what happens to an *already-placed* action's display when the **plugin process itself** restarts (wiping its in-memory render-state memory entirely, not just Gatoway core restarting while the plugin keeps running) **and** no layout config exists to re-derive positions from.
+
+**Scenario:** A user places the generic Key/Dial actions on their device (a one-time setup step, per `stream-deck-idle-display`'s existing model). At some point the Stream Deck plugin process restarts (e.g. the Stream Deck software itself restarts, the user manually restarts the plugin, or — as tested here — `streamdeck restart` during development) while no layout config file exists yet (a very plausible fresh-install scenario, not an exotic edge case). Because the plugin's in-memory render-state memory is wiped by the restart, and Gatoway core's idle sweep has zero positions to send anything for (per D4, correctly, since it has no config to derive positions from), nothing tells the freshly-restarted plugin what any position should show. Whatever appears is undefined behavior specific to the SDK/hardware, not anything Gatoway's design actually guarantees.
+
+**Evidence:** Live-confirmed with the user. After restoring a working config, focusing, blurring, and confirming normal idle appearance on all 4 positions (3 keys + 1 dial, one key deliberately bound only under a never-connecting second plugin type to test D3), the config file was moved aside and the plugin restarted (`streamdeck restart`). Gatoway core's log correctly showed `layout_config_missing` and started normally (no crash — D4's stated behavior holds). But: the 3 keypad positions continued showing "Gatoway" (confirmed by the user to be coincidental — physical Stream Deck keys retain their last-pushed image at the hardware level, independent of the plugin process's own state), while the dial showed **"Dial"** — its manifest `Name` field, not the `Title: "Gatoway"` its manifest actually declares as the default state — and remained stuck showing "Dial" even several seconds later, confirmed unchanged by the user on a direct follow-up check. Restoring the config file and restarting again immediately corrected all 4 positions back to "Gatoway" (confirmed by the user), proving the underlying mechanism is sound once Gatoway core has positions to sweep — the gap is specifically the no-config-plus-restart combination.
+
+**Impact:** A real user setting up Gatoway for the first time (no config file created yet) who restarts the Stream Deck plugin at any point (including simply relaunching the Stream Deck software, a completely ordinary occurrence) can end up with a permanently confusing, uninitialized-looking dial display, with no built-in way for the system to correct it short of creating a config file (even an empty/placeholder one) and restarting again. This is a first-run experience gap, not a rare edge case.
+
+**Suggested fix direction:** Not a simple code patch — the underlying question is architectural: should the Stream Deck plugin guarantee a sane default appearance for any placed action **independent of** whatever Gatoway core's config currently knows, rather than relying entirely on a server-driven idle sweep whose position knowledge comes solely from the loaded layout config? A plausible direction: have the plugin's own `onWillAppear` handler apply a hardcoded local baseline (matching the manifest's own declared default — label "Gatoway", default icon) immediately whenever no remembered render state exists for a position, *before* and independent of anything Gatoway core sends — restoring the original static-Idle-action's reliable "always shows something sane immediately" guarantee, while still letting a later `render_update` override it once Gatoway core has something real to say. This needs a real design decision (does `LayoutResolver`/`allPositions()` need to change, or is this purely a Stream Deck plugin-side fix?), not a guess implemented ad hoc.
+
+**Root-cause level:** Design. This is a genuine gap in how two already-made decisions (`persisted-layout-config` D4, `focus-profile-routing` D5) interact under a combination neither one's scope considered — not an implementation mistake within either decision as written.
+
+## Checks Completed
+
+- **Real config load:** hand-authored a two-profile `layout.json` at the real default config path (`~/Library/Application Support/gatoway/layout.json`, no env override — matching how the Stream-Deck-spawned Gatoway core actually resolves its config path); confirmed `layout_config_loaded` with `profileCount: 2` in the real log.
+- **D3 (union across profiles), live, without a second connection:** a key bound only under a plugin type that never connects (`test-app-other`) correctly showed the idle appearance from Gatoway core's very first startup sweep — confirmed both in the log (4 positions swept, not 3) and visually by the user after placing that fourth action.
+- **Real end-to-end resolution through the actual Stream Deck plugin:** the existing `test-app` test-double client registering and focusing correctly rendered "Fixture A"/"Fixture B"/"Fixture Dial" at their configured positions, while the unrelated fourth position remained idle throughout — confirmed by the user.
+- **Idle reversion:** blur and disconnect both correctly reverted all three "test-app"-bound positions to idle, confirmed by the user.
+- **Missing-config fallback:** confirmed safe (no crash, correct log event) but surfaced QA-014 above.
+- **Config restoration:** confirmed a subsequent restart with the config back in place immediately corrects all 4 positions, including the previously-stuck dial.
+
+## Review Verdict (this session)
+
+**Recommendation:** ⚠️ **Conditional pass** — The core file-backed binding mechanism (loading, resolution by plugin type, the D3 union behavior) is fully confirmed correct on real hardware, including the specific scenario task 4.4 deferred. One Major, design-level finding (QA-014) is open: the interaction between a missing config and a full plugin restart can leave placed actions in an inconsistent, uncorrected state indefinitely — a real first-run risk, not a rare edge case. The main agent should route this to `/design-architecture` (or handle as a design revision within this change, given it directly touches this change's own D4) before archiving, since it affects the actual first-run experience this change is meant to unblock.
+
+---
+---
+
+# QA-014 Fix Re-Verification — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Re-checking the developer's QA-014 fix (commit `6dd1e8a`: `genericKeyRenderer.ts`/`genericDialRenderer.ts` now apply a local default baseline — the manifest's declared label/icon — whenever no remembered render state exists, independent of Gatoway core) by reproducing the exact original failure scenario live.
+
+## Outcome: Resolved, confirmed by direct reproduction
+
+Reproduced the identical sequence that originally surfaced QA-014: the layout config file was removed and the Stream Deck plugin was restarted (`streamdeck restart`), reproducing a full plugin-process restart with no config file present — the exact combination that previously left the dial stuck showing "Dial" indefinitely.
+
+**Result:** the dial now correctly shows "Gatoway" immediately, confirmed directly by the user, with no stuck or uninitialized appearance. The config file was then restored and the plugin restarted again; all four positions (three keypad, one dial) were confirmed correct afterward.
+
+187 tests pass across both packages (up from 165 before this fix cycle), typecheck clean for both.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-014 is confirmed resolved by direct reproduction of the original failure scenario, not just by trusting the fix's own unit tests. Both the core file-backed binding mechanism (this change's primary purpose) and the local-default-baseline fix are now fully verified on real hardware. This change is ready for `doc-writer` (the layout config schema documentation design.md anticipates, plus the already-open `docs/PROTOCOL.md` gaps if any remain) and `/opsx:archive`.
