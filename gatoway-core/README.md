@@ -6,19 +6,28 @@ Solidworks xDesign). It is a standalone Node.js/TypeScript process: application 
 connect into it over TCP or WebSocket, authenticate, and exchange a shared JSON message
 protocol.
 
-This package implements the **foundation** only — the connection/authentication/protocol/
-logging plumbing described below. See [Current Scope and Limitations](#current-scope-and-limitations)
-for what is deliberately not yet built.
+This package implements the connection/authentication/protocol/logging foundation
+(`gatoway-core-foundation`) plus, as of `focus-profile-routing`, focus tracking (which
+single connection, if any, currently has focus), profile routing (resolving physical
+Stream Deck input against the focused connection's bound capability and forwarding a
+`command`), and live capability display updates (`capability_update`). See
+[Current Scope and Limitations](#current-scope-and-limitations) for what is deliberately
+not yet built.
 
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
-and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the detailed capability specs this
-package implements, see
+and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract, see
+[`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — the reference an application plugin
+author should build against, rather than this package's own source. For the detailed
+capability specs this package implements, see
 [`openspec/specs/`](../openspec/specs/)
 (`connection-management`, `plugin-authentication`, `message-protocol`,
 `diagnostics-logging`) — consolidated there after the `gatoway-core-foundation` change
 that introduced them was archived; see
 [`openspec/changes/archive/2026-07-13-gatoway-core-foundation/`](../openspec/changes/archive/2026-07-13-gatoway-core-foundation/)
-for that change's original proposal and design record.
+for that change's original proposal and design record, and
+[`openspec/changes/focus-profile-routing/`](../openspec/changes/focus-profile-routing/)
+for the focus-tracking/profile-routing/capability-update change (not yet archived at
+the time of writing).
 
 ## Requirements
 
@@ -114,8 +123,9 @@ instead against the `GATOWAY_ALLOWED_ORIGINS` allowlist at the HTTP-upgrade stag
 ## Manual test clients
 
 Two scripts let you exercise the accept/reject behavior of each listener against a
-running Gatoway core instance, without a real plugin. Start Gatoway core first
-(`npm run dev`), then in another terminal:
+running Gatoway core instance, without a real plugin (a third, described further below,
+exercises the focus/routing/capability-update mechanism instead). Start Gatoway core
+first (`npm run dev`), then in another terminal:
 
 ```bash
 # Exercises the TCP listener: connects once with the current valid token
@@ -134,6 +144,21 @@ Both scripts print the observed `register_ack` (or upgrade-refusal) result for e
 attempt, and honor the same `GATOWAY_*` environment variables as Gatoway core itself, so
 they find the running instance's port and token file by default.
 
+A third script, added by `focus-profile-routing`, stands in for a real application
+plugin so focus tracking, profile routing, and live capability updates can be exercised
+end to end — including against real Stream Deck+ hardware, via the actual Stream Deck
+plugin connected as the display client:
+
+```bash
+npm run manual:test-app-client
+```
+
+It registers a small fixture set of capabilities (matching
+`src/routing/testFixtureLayoutResolver.ts`'s hardcoded test layout) and accepts
+`focus` / `blur` / `update` / `quit` commands typed at the prompt — see
+[`stream-deck-plugin/README.md`](../stream-deck-plugin/README.md#exercising-the-mechanism-without-a-real-application-plugin)
+for the full walkthrough of what each command does.
+
 ## Message protocol
 
 Every message, on either transport, shares one JSON envelope:
@@ -145,20 +170,33 @@ Every message, on either transport, shares one JSON envelope:
 - **TCP:** newline-delimited JSON — one JSON object per line.
 - **WebSocket:** one JSON object per text frame.
 
-This foundation change defines three message types:
+The full message set, as of `focus-profile-routing`:
 - `register` (plugin → core): declares `pluginType` and a `capabilities` manifest
   (button/dial actions the plugin supports); TCP clients also include their auth `token`.
 - `register_ack` (core → plugin): `status: "ok" | "rejected"`, the assigned
   `connectionId`, and a `reason` on rejection.
 - `error` (either direction): a protocol-level error report.
+- `focus` (application plugin → core): reports the plugin's own focus/blur state.
+  Gatoway core tracks at most one focused connection at a time and switches the Stream
+  Deck's displayed profile accordingly.
+- `input_event` (Stream Deck plugin → core): a raw physical interaction (key
+  down/up, dial rotate/push) at a given position — no app-specific meaning attached.
+- `render_update` (core → Stream Deck plugin): what to display at a given position
+  (icon/label/state), including the built-in idle appearance when nothing is focused.
+- `command` (core → focused application connection): an `input_event` resolved against
+  that connection's bound capability.
+- `capability_update` (application plugin → core): lets a plugin push a live
+  icon/label/state change to one of its own already-declared capabilities at any time
+  after registration (satisfies `REQUIREMENTS.md` FR-001).
 
-Command and state-update message types (the actual button-press/dial-turn and
-state-push traffic) are **not yet defined** — they belong to a later change, once at
-least one application plugin exists to use them (the Stream Deck plugin itself now
-exists — see [`../stream-deck-plugin/`](../stream-deck-plugin/) — but registers with an
-empty capability manifest and has nothing to route commands to yet). See the
-[`message-protocol` spec](../openspec/specs/message-protocol/spec.md)
-for the full envelope and payload contracts.
+See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full reference — envelope,
+every payload shape, the `icon` field's null-vs-omitted reset semantics, and practical
+icon/label content guidance — rather than the abbreviated summary above. The
+[`message-protocol` spec](../openspec/specs/message-protocol/spec.md) covers only the
+original `register`/`register_ack`/`error` set from `gatoway-core-foundation`; the five
+message types added by `focus-profile-routing` are specified in that change's own
+[`specs/message-protocol/spec.md`](../openspec/changes/focus-profile-routing/specs/message-protocol/spec.md)
+until the change is archived and consolidated.
 
 ## Logging
 
@@ -180,23 +218,34 @@ npm run typecheck  # tsc --noEmit
 
 ## Current scope and limitations
 
-This package currently implements only the **core foundation** — the first change in
-Gatoway's delivery sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of the
-most recent change:
+This package now implements the core foundation (`gatoway-core-foundation`, the first
+change in Gatoway's delivery sequence) plus focus tracking, profile routing, and live
+capability updates (`focus-profile-routing`, delivery-sequence step 4; see
+`../ARCHITECTURE.md`'s Delivery Sequence). As of the most recent change:
 
 - **A Stream Deck plugin now exists** ([`../stream-deck-plugin/`](../stream-deck-plugin/))
-  that spawns, supervises, and connects to Gatoway core as a client, and renders a
-  static idle key on physical Stream Deck hardware. It registers with an empty
-  capability manifest and forwards no button presses or dial turns — see that
-  package's own README for its scope.
-- **No application plugins exist yet** (no Lightroom adapter, no xDesign/xDender
-  browser extension).
-- **No focus tracking or profile switching.** Plugins can register and authenticate,
-  but there is no concept yet of which plugin has focus, no profile/idle-profile
-  switching logic, and no persisted button/dial layout configuration. These are deferred
-  to later changes.
-- **Only the registration handshake is implemented** in the message protocol; command
-  and state-update message types don't exist yet.
+  that spawns, supervises, and connects to Gatoway core as a client, and renders
+  Gatoway's generic, position-based Key/Dial actions on physical Stream Deck hardware —
+  including the built-in idle appearance when nothing is focused. It registers with an
+  empty capability manifest of its own (it is the display client, not an application
+  connection) — see that package's own README for its scope.
+- **Focus tracking and profile routing now work end to end.** Gatoway core tracks which
+  single connection (if any) currently has focus, resolves physical `input_event`s
+  against that connection's bound capability, forwards resolved `command`s, and keeps
+  the Stream Deck plugin's display in sync with focus changes, falling back to the idle
+  appearance when nothing is focused.
+- **Live capability updates work.** A connection can push a `capability_update` for one
+  of its own already-declared capabilities at any time after registration, and Gatoway
+  core immediately re-renders it on the Stream Deck if that connection is currently
+  focused (`REQUIREMENTS.md` FR-001).
+- **No persisted layout config yet.** Position → capability bindings are resolved
+  against an in-code test fixture (`src/routing/testFixtureLayoutResolver.ts`), not a
+  real config file — that's delivery-sequence step 6, a later change.
+- **No real application plugins exist yet** (no Lightroom adapter, no xDesign/xDender
+  browser extension) — `focus-profile-routing` proves the mechanism using a manual
+  test-double client (`test/manual/testAppClient.ts`; see
+  [Manual test clients](#manual-test-clients)) and live verification against real
+  Stream Deck+ hardware, not a real second application.
 
 ## Known open items (see `QA_REPORT.md`)
 

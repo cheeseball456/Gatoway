@@ -6,10 +6,16 @@ Solidworks xDesign, and future integrations — so that adding Stream Deck suppo
 new application doesn't require rebuilding the communications layer from scratch.
 
 This project is early-stage: the current codebase implements Gatoway core's
-foundational connection/authentication/protocol/logging layer (`gatoway-core/`) and a
-Stream Deck plugin skeleton (`stream-deck-plugin/`) that spawns/supervises core and
-renders a static idle key on real Stream Deck hardware, described in the package docs
-below. No application plugins (Lightroom, xDesign) exist yet.
+connection/authentication/protocol/logging foundation, focus tracking, profile routing,
+and live capability updates (`gatoway-core/`), and a Stream Deck plugin
+(`stream-deck-plugin/`) that spawns/supervises core and renders Gatoway's generic,
+position-based Key/Dial actions on real Stream Deck hardware — including the built-in
+idle appearance when no application currently has focus — described in the package docs
+below. No real application plugins (Lightroom, xDesign) exist yet; the mechanism has
+instead been proven using a manual test-double application client
+(`gatoway-core/test/manual/testAppClient.ts`) verified live against real Stream Deck+
+hardware. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full wire message
+contract a future application plugin author would build against.
 
 This is an npm workspaces monorepo: install and build from this root directory, not
 from inside an individual package directory (see each package's README for details).
@@ -20,6 +26,7 @@ from inside an individual package directory (see each package's README for detai
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the system's components, key design decisions, and delivery sequence.
 - [`openspec/`](openspec/) — per-change specs and design records (spec-driven development via OpenSpec).
 - [`QA_REPORT.md`](QA_REPORT.md) — review and verification findings for implemented changes.
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — the full Gatoway wire message protocol reference for anyone writing a new application plugin.
 
 ## Packages
 

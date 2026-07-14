@@ -1,11 +1,13 @@
 # Gatoway Message Protocol Reference
 
-**Status: draft**, produced by the `focus-profile-routing` change (tasks.md 5.1/5.2).
-This is a first-pass reference covering the full message contract implemented as of
-that change; final polish and placement are owned by the `doc-writer` role. If you are
-writing a new application plugin (following Lightroom or xDesign), this document
-should be the only thing you need to read to speak Gatoway's wire protocol — you should
-not need to read Gatoway core's source.
+Covers the full message contract implemented as of the `focus-profile-routing` change,
+including its task-group-7 addendum (`capability_update` and the `render_update`/
+`capability_update` icon reset semantics). If you are writing a new application plugin
+(following Lightroom or xDesign), this document should be the only thing you need to
+read to speak Gatoway's wire protocol — you should not need to read Gatoway core's
+source. Kept in sync with `gatoway-core/src/protocol/messages.ts`, the single source of
+truth for these shapes; if the two ever disagree, the source wins and this document is
+stale.
 
 ## Transport and framing
 
@@ -89,8 +91,18 @@ interface Capability {
   type: "button" | "dial";
   description?: string;
   icon?: string;
+  state?: number;            // toggle/indicator state, e.g. on/off
 }
 ```
+
+`icon` here is a plain optional string, not the `string | null | undefined` three-way
+distinction `render_update`/`capability_update` use on the wire (see below) — on this
+stored, in-memory record, `undefined` covers both "never declared an icon" and
+"explicitly reset via a later `capability_update`"; both are the same fact ("this
+capability currently has no icon") from a plugin author's point of view. See
+[Icon and label content](#icon-and-label-content) for format and length guidance that
+applies to `icon`/`label` everywhere they appear in the protocol — at registration, in
+`render_update`, and in `capability_update`.
 
 ### `register_ack` (core → plugin)
 
@@ -231,7 +243,7 @@ built-in idle appearance Gatoway core sends when no connection is focused.
 interface RenderUpdatePayload {
   controller: Controller;
   position: Position;
-  icon?: string;
+  icon?: string | null;
   label?: string;
   state?: number; // keys only — the Elgato SDK has no equivalent concept for dials
 }
@@ -244,8 +256,50 @@ state per position indefinitely on its own side, so it continues showing whateve
 last rendered even across a Gatoway core disconnect or restart, until a new
 `render_update` arrives.
 
+**`icon` is three-way, not two-way — this distinction matters.** Because JSON
+serialization collapses an omitted field and an explicitly-`undefined` field into the
+same thing (neither appears on the wire at all), "leave unchanged" and "explicitly clear
+this icon" need two different representations:
+
+- **`undefined` / field omitted entirely** — leave whatever icon was last displayed at
+  this position unchanged. This is the common case for a partial update (e.g. one that
+  only changes `label`).
+- **`null`** — explicitly reset the icon to the manifest's bundled default image for
+  that position's action (equivalent to calling the Elgato Stream Deck SDK's own
+  `setImage()` with no argument). Gatoway core's idle sweep always sends `icon: null`
+  for exactly this reason: without a distinct "reset" value, there would be no way to
+  actually clear a previously-focused connection's capability icon once focus moves
+  away from it — omitting `icon` would leave it visually stuck, and inventing a fake
+  sentinel string would be worse.
+- **a string** — set the icon to this value. See
+  [Icon and label content](#icon-and-label-content) below for the required format.
+
 Only the Stream Deck plugin's own connection (`pluginType: "stream-deck"`) ever
 receives `render_update` messages.
+
+### Icon and label content
+
+Practical guidance for any `icon`/`label` value sent in `register`'s `capabilities`,
+`render_update`, or `capability_update` — established during live verification of this
+change against real Stream Deck+ hardware:
+
+- **`icon` must be a self-contained image string — never a file path.** Gatoway core's
+  Stream Deck plugin bundle cannot contain image assets for applications that don't
+  exist at build time (any future application plugin's icons are unknown when the
+  Stream Deck plugin is packaged), so `icon` must carry the image data itself: either a
+  base64 data URI with a declared MIME type (e.g.
+  `data:image/png;base64,iVBORw0KGgo...`) or an inline SVG string. A filesystem path
+  would only resolve on the machine and account that produced it, and Gatoway core has
+  no mechanism to resolve or transmit a path's file contents on an application's behalf.
+- **Keep `label` short — roughly 8-10 characters at the Stream Deck's default font
+  size.** The physical key's title area clips or overflows past that, rather than
+  wrapping or shrinking to fit. Confirmed live on real Stream Deck+ hardware during this
+  change's verification: a 7-character label (`"Gatoway"`, the built-in idle label)
+  displays fully, while a 19-character label (`"Fixture A (pushed)"`, sent by the manual
+  test-app client's `update` command) visibly overflows the key's title area. Prefer a
+  short label plus, if more context is needed, the `description` field declared at
+  registration (not currently rendered on the physical device, but available for a
+  future Property Inspector or tooltip use).
 
 ### `command` (core → focused application connection)
 
@@ -281,7 +335,50 @@ interface CommandPayload {
 > every other message type. See the `focus-profile-routing` change's developer report
 > for the full note; a future architecture pass may want to formally ratify this shape.
 
-## Example: a full focus/input/render cycle
+### `capability_update` (application plugin → core)
+
+Lets a plugin push a live display change to one of its own already-declared
+capabilities, at any time after registration — not just at registration time. This is
+the mechanism that satisfies `REQUIREMENTS.md` FR-001's "an application can push a state
+update that changes a button's icon, label, or toggle state."
+
+```jsonc
+{
+  "type": "capability_update",
+  "payload": {
+    "capabilityId": "next-photo",
+    "label": "Next Photo (3/24)"
+  }
+}
+```
+
+```ts
+interface CapabilityUpdatePayload {
+  capabilityId: string;
+  icon?: string | null;
+  label?: string;
+  state?: number;
+}
+```
+
+- **Fields other than `capabilityId` are sparse**, using the same
+  unchanged-if-omitted / explicit-`null`-resets-icon semantics as `render_update`'s
+  `icon` field (see [Icon and label content](#icon-and-label-content) above for format
+  and length guidance — it applies here too).
+- **A plugin may only update capabilities it has itself declared.** Gatoway core looks
+  `capabilityId` up within the *sending connection's own* registered capabilities only;
+  an id that isn't among them is ignored (logged, not an error) — a plugin can never
+  reach into another connection's capabilities this way.
+- **No acknowledgement message.**
+- **Rendered immediately if relevant.** If the sending connection currently has focus
+  and the updated capability is bound to a position in its layout, Gatoway core
+  immediately sends the Stream Deck plugin a fresh `render_update` reflecting the
+  change — an application doesn't have to wait for the user to press something, or for
+  a focus change, to see its own pushed update take effect. If the sending connection
+  isn't currently focused, the update is still stored (so it's reflected next time that
+  connection gains focus), but nothing is rendered right away.
+
+## Example: a full focus/input/render/update cycle
 
 1. An application plugin connects, authenticates, and sends `register` declaring a
    `next-photo` button capability.
@@ -294,6 +391,12 @@ interface CommandPayload {
 5. Gatoway core resolves that position against the focused connection's layout,
    finds the `next-photo` capability, and sends that connection
    `command: { capabilityId: "next-photo", eventType: "keyDown" }`.
-6. The application plugin acts on it (e.g. advances to the next photo).
+6. The application plugin acts on it (e.g. advances to the next photo), and pushes
+   `capability_update: { capabilityId: "next-photo", label: "Next Photo (4/24)" }` to
+   reflect the new position in its own photo sequence. Since this connection is still
+   focused and `next-photo` is still bound at row 0, column 1, Gatoway core immediately
+   sends the Stream Deck plugin a fresh `render_update` for that position with the
+   updated label — no further key press or focus change needed.
 7. When the application loses focus (or disconnects), Gatoway core sends the Stream
-   Deck plugin a fresh `render_update` sweep reflecting the built-in idle appearance.
+   Deck plugin a fresh `render_update` sweep reflecting the built-in idle appearance
+   (`icon: null`, explicitly resetting any icon the previous capability displayed).

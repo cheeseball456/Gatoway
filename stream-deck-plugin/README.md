@@ -5,15 +5,32 @@ Gatoway core as a child process, connects to it as an authenticated TCP client, 
 renders Gatoway's key(s) on physical Elgato Stream Deck hardware via the official Elgato
 Stream Deck SDK.
 
-This package currently implements only the **skeleton** described below — a single
-static "Idle" key, no per-application profiles, no command forwarding yet. See
-[Scope and Limitations](#scope-and-limitations) for what is deliberately not yet built.
+As of the `focus-profile-routing` change, this package implements Gatoway's generic,
+position-based action model (`ARCHITECTURE.md` AD-8): two generic actions, **Key**
+(keypad positions) and **Dial** (encoder/dial positions), whose displayed content and
+behavior are fully controlled by Gatoway core. Neither action has any app-specific or
+even idle-specific knowledge baked into it — the plugin only forwards raw physical
+events (`input_event`) and renders whatever Gatoway core instructs (`render_update`),
+including the built-in idle appearance shown when no application currently has focus.
+This replaces the earlier `stream-deck-plugin-skeleton` change's single static "Idle"
+action, which is no longer part of the plugin (see
+[Placing the generic actions](#placing-the-generic-actions-manual-one-time) and
+[Migrating from the old Idle action](#migrating-from-the-old-idle-action) below). There
+is still no application-specific plugin work in this repository (no Lightroom or
+xDesign integration) — see [Scope and limitations](#scope-and-limitations).
 
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
-and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the detailed capability specs this
-package implements, see
+and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract
+(`register`, `focus`, `input_event`, `render_update`, `command`, `capability_update`),
+see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — this is the reference an application
+plugin author should build against. For the detailed capability specs this package
+implements, see
 [`openspec/changes/stream-deck-plugin-skeleton/specs/`](../openspec/changes/stream-deck-plugin-skeleton/specs/)
-(`stream-deck-core-lifecycle`, `stream-deck-core-client`, `stream-deck-idle-display`).
+and
+[`openspec/changes/focus-profile-routing/specs/`](../openspec/changes/focus-profile-routing/specs/)
+(`stream-deck-idle-display`'s delta spec — despite its name, this is now where the
+generic action model is specified; the original static-Idle requirements it once held
+were removed in favor of the generic Key/Dial requirements).
 
 ## Requirements
 
@@ -83,26 +100,82 @@ it end to end:
    ```bash
    streamdeck restart
    ```
-5. **Place the Idle key on a physical key.** See the next section — this is a required,
-   one-time manual step in the plugin's current state.
+5. **Place a generic Key or Dial action on a physical key/dial.** See the next section
+   — this is a required, one-time manual step in the plugin's current state.
 
 After a code change, rebuild (`npm run build`) and re-run `streamdeck restart` to pick
 up the new `bin/plugin.js`.
 
-### Placing the Idle key (manual, one-time)
+### Placing the generic actions (manual, one-time)
 
-The plugin does **not** currently auto-provision a profile or place its key for you.
+The plugin does **not** currently auto-provision a profile or place actions for you.
 After linking and restarting, open the Stream Deck application, find the **Gatoway**
-category in the action list, and drag the **Idle** action onto a physical key yourself.
-Once placed, the key renders its icon and "Gatoway" title immediately, and continues to
-do so across Gatoway core disconnects/restarts — but nothing appears on the device until
-this manual placement happens.
+category in the action list, and drag the **Key** action onto a physical key and/or the
+**Dial** action onto a physical dial yourself (a Stream Deck+ has both keys and dials;
+plain Stream Deck models have only keys). Once placed, the position renders whatever
+Gatoway core's most recent `render_update` instructed — the built-in idle appearance
+(icon reset to the manifest default, "Gatoway" title) by default, since nothing is
+focused until an application plugin connects and reports focus — and continues to do so
+across Gatoway core disconnects/restarts. Nothing appears on the device until this
+manual placement happens.
 
 This is a known, deliberate limitation, not an oversight: a true zero-touch auto-install
-(a bundled Stream Deck profile that places the key automatically on install) was
-attempted and tested live against real hardware, found not to work, and was reverted.
-See `openspec/changes/stream-deck-plugin-skeleton/design.md`'s Open Questions for the
-full investigation and why it's deferred to a future change, rather than solved here.
+(a bundled Stream Deck profile that places actions automatically on install) was
+attempted and tested live against real hardware for the original static Idle action,
+found not to work, and was reverted; this change did not revisit that decision. See
+`openspec/changes/stream-deck-plugin-skeleton/design.md`'s Open Questions for the full
+investigation and why it's deferred to a future change, rather than solved here.
+
+### Migrating from the old Idle action
+
+If you placed the earlier `stream-deck-plugin-skeleton` change's static **Idle** action
+on a key before upgrading, it no longer exists — the plugin's manifest replaces it
+outright with the generic **Key**/**Dial** actions described above (an internal, clean
+replacement, since Gatoway has no public users yet; see
+`openspec/changes/focus-profile-routing/proposal.md`'s Migration Plan). After
+rebuilding and restarting with this version, the old Idle key will show as a missing/
+unrecognized action on the Stream Deck application's profile — remove it and drag the
+new **Key** action onto that position instead.
+
+### Exercising the mechanism without a real application plugin
+
+No real Lightroom or xDesign plugin exists yet — both are future work (`ARCHITECTURE.md`
+delivery-sequence steps 3 and 5). To exercise focus tracking, profile routing, and live
+capability updates end to end against real hardware in the meantime, `gatoway-core`
+ships a manual test-double application-plugin client:
+[`gatoway-core/test/manual/testAppClient.ts`](../gatoway-core/test/manual/testAppClient.ts).
+
+With Gatoway core already running (e.g. via this plugin, or standalone with
+`npm run dev --workspace=gatoway-core`), run from the repository root:
+
+```bash
+npm run manual:test-app-client --workspace=gatoway-core
+```
+
+This connects to Gatoway core, registers as `pluginType: "test-app"` declaring a small
+fixture set of capabilities (two buttons, one dial — matching
+`gatoway-core/src/routing/testFixtureLayoutResolver.ts`'s hardcoded test layout), and
+then accepts commands typed at the prompt:
+
+- **`focus`** — reports `focused: true`. Should bind the test fixture's two keys and one
+  dial on the real hardware, replacing the idle appearance.
+- **`blur`** — reports `focused: false`. Should revert the hardware to the idle
+  appearance, with the icon explicitly reset rather than left showing whatever the test
+  app last displayed.
+- **`update`** — pushes a `capability_update` toggling one button's label between
+  `"Fixture A"` and `"Fixture A (pushed)"`. If this client is currently focused, the
+  real hardware should update immediately, with no further focus change or key press
+  needed — this is the live capability-update mechanism's headline behavior.
+- **`quit`** — disconnects. Since a disconnect while focused clears focus exactly like
+  an explicit blur, this should also revert the hardware to the idle appearance.
+
+Any `command` message Gatoway core sends back (a bound key press or dial turn on the
+real hardware while this test-double is focused) is printed to the console as it
+arrives. This script is genuinely useful beyond this change's own verification —
+anyone developing or testing Gatoway further, including whoever eventually adapts the
+real Lightroom plugin, can use it to exercise the full mechanism without needing a real
+application plugin connected. See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the
+full message contract this script (and any real plugin) speaks.
 
 ## How it spawns Gatoway core
 
@@ -118,8 +191,12 @@ The plugin then connects to the spawned Gatoway core instance as a TCP client, u
 same `register`/`register_ack` handshake and shared-secret token any other native
 plugin uses (see [`gatoway-core/README.md`](../gatoway-core/README.md)'s "Message
 protocol" and "Auth token file" sections), registering with plugin type `stream-deck`
-and an empty capability manifest — this change forwards no button presses or dial turns
-anywhere yet.
+and an empty capability manifest. This is deliberate and unrelated to the generic action
+model added by `focus-profile-routing`: per `ARCHITECTURE.md` AD-8, the Stream Deck
+plugin's own connection never declares capabilities — it is the one display client
+Gatoway core sends `render_update` to, not an application connection with its own
+capabilities to bind positions to. It forwards physical `input_event`s and applies
+`render_update`s exactly as described in [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md).
 
 ## Configuration
 
@@ -165,18 +242,25 @@ that was confirmed live against real Stream Deck+ hardware during `/verify` (see
 
 ## Scope and limitations
 
-This package currently implements only the **skeleton** — the second change in
-Gatoway's delivery sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of this
-change:
+This package implements the plugin skeleton (`stream-deck-plugin-skeleton`) plus the
+generic action model, focus/profile routing on the Gatoway core side, and live
+capability updates (`focus-profile-routing`) — the fourth change in Gatoway's delivery
+sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of this change:
 
-- **No command forwarding.** Physical button presses and dial turns are not sent
-  anywhere — there is no `command` message type yet in Gatoway core's protocol, and no
-  application plugin connected to route them to.
-- **No profile switching or focus tracking.** There is exactly one static profile (the
-  Idle key described above) — no per-application profiles, no idle-vs-app-profile
-  distinction, no dynamic key content.
-- **No auto-install of the Idle key.** See
-  [Placing the Idle key](#placing-the-idle-key-manual-one-time) above.
+- **Command forwarding, profile routing, and focus tracking all work end to end** —
+  Gatoway core resolves a physical key press or dial turn against whichever connection
+  currently has focus and forwards a `command`, and switches the Stream Deck's display
+  between an application's bound layout and the built-in idle appearance as focus
+  changes. All of this has been verified live against real Stream Deck+ hardware using
+  a test-double application client (see
+  [Exercising the mechanism without a real application plugin](#exercising-the-mechanism-without-a-real-application-plugin)
+  above), since no real Lightroom/xDesign plugin exists yet.
+- **No persisted layout config yet.** Gatoway core currently resolves position →
+  capability bindings against an in-code test fixture
+  (`gatoway-core/src/routing/testFixtureLayoutResolver.ts`), not a real config file —
+  that's delivery-sequence step 6, a later change, not this one.
+- **No auto-install of the generic actions.** See
+  [Placing the generic actions](#placing-the-generic-actions-manual-one-time) above.
 - **No Property Inspector or settings UI** for the plugin.
 - **No application-specific plugin work** (no Lightroom or xDesign integration) — that
   is scoped to later changes in the delivery sequence.
@@ -199,9 +283,14 @@ time of writing:
   (`stream-deck-plugin/src/coreClient/coreClient.ts`).
 - `stream-deck-plugin/package.json` pins `"typescript": "^7.0.2"`, an unusually early
   major version (consistent with `gatoway-core`'s own existing pin).
-- True zero-touch auto-install of the Idle key onto a profile was attempted, found not
-  to work against real hardware, and reverted — deferred to a future change (see
-  `design.md`'s Open Questions).
+- True zero-touch auto-install of a generic action onto a profile was attempted (for the
+  original static Idle action, before this change), found not to work against real
+  hardware, and reverted — deferred to a future change (see
+  `stream-deck-plugin-skeleton`'s `design.md` Open Questions).
+- A capability label longer than roughly 8-10 characters visibly overflows a physical
+  key's title area (e.g. the manual test-app client's `"Fixture A (pushed)"` label) —
+  see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md#icon-and-label-content) for practical
+  length guidance.
 
 See `../QA_REPORT.md` for full detail and status on these and all other findings from
 this change's review and verification.
