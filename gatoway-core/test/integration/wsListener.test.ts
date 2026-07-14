@@ -83,6 +83,28 @@ describe("WebSocket listener (integration)", () => {
     ws.close();
   });
 
+  it("completes the upgrade when Origin matches a wildcard allowlist entry (wildcard-origin-allowlist)", async () => {
+    const port = await findFreePort();
+    const manager = new ConnectionManager(silentLogger());
+    handle = await startWsListener({
+      port,
+      manager,
+      logger: silentLogger(),
+      allowedOrigins: ["moz-extension://*"],
+    });
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: "moz-extension://some-per-install-uuid" });
+    await new Promise<void>((resolve, reject) => {
+      ws.on("open", () => resolve());
+      ws.on("error", reject);
+    });
+
+    expect(manager.list()).toHaveLength(1);
+    expect(manager.list()[0]?.state).toBe("authenticated");
+
+    ws.close();
+  });
+
   it("refuses the upgrade when Origin is not allowlisted", async () => {
     const port = await findFreePort();
     const manager = new ConnectionManager(silentLogger());
