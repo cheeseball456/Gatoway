@@ -496,3 +496,34 @@ All core behaviors were confirmed live, on real hardware, with the user directly
 ## Review Verdict (this session)
 
 **Recommendation:** ⚠️ **Conditional pass** — All core lifecycle, connection, resilience, and rendering behavior is confirmed working correctly on real hardware. One Minor finding (QA-009) is open, with a fix direction already agreed with the user (add a `Profiles` entry with `DontAutoSwitchWhenInstalled: true`). The main agent should route QA-009 to the `developer` subagent, then do a final confirmation pass (re-link and re-check the device) before moving to `doc-writer` and `/opsx:archive`. The developer-mode requirement should be captured in documentation, not fixed in code.
+
+---
+---
+
+# QA-009 Fix Attempt and Final Disposition — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Re-checking the developer's QA-009 fix (commit `01dfe90`: added a `Profiles` entry to `manifest.json` and a bundled `Gatoway.streamDeckProfile` with the Idle action pre-placed) live against real hardware.
+
+## Outcome: fix did not achieve auto-install; root cause investigated; user accepted current behavior
+
+After the developer's fix, restarting the plugin against real hardware produced **no visible change** — the user confirmed no new "Gatoway" profile appeared anywhere, including in the profile switcher (not just "didn't force-switch," which would have been the expected effect of `DontAutoSwitchWhenInstalled: true` — nothing registered at all).
+
+Investigated directly against two real reference points already present on this machine:
+- **Volume Controller** (a currently-installed, working third-party plugin): its manifest's `Profiles` entries include an `"AutoInstall": false` field neither our manifest nor Lightroom's includes. Inspecting its bundled `.streamDeckProfile` files showed its "(Auto)" profiles are templates the plugin switches to *programmatically* (via an in-profile "Auto Software Detection" action), not profiles that appear automatically on install — so this is not actually a working example of the behavior we wanted.
+- **Lightroom's own bundled template** (`profiles/Lightroom.streamDeckProfile`): has the same empty `Device.Model`/`Device.UUID` fields as our fix. The real, currently-active "Lrc" profile the user actually uses day-to-day was found under Stream Deck's own profile storage with a populated `Device.Model` — consistent with it having been created manually by the user within the Stream Deck software, not auto-installed from that bundled template.
+
+**Conclusion:** neither existing plugin in this codebase is a confirmed working example of zero-touch profile auto-installation. Determining the actual mechanism (there may be an `AutoInstall: true` field or a different convention entirely) would require authoritative Elgato SDK documentation not accessible in this session, rather than further guess-and-check against undocumented behavior.
+
+**Discussed directly with the user, who decided:** accept manual placement (already confirmed working correctly in the original `/verify` session — icon and title render properly once the Idle action is dragged onto a key) as the current behavior, and explicitly **defer** true auto-install to a future change rather than continue investigating now.
+
+## Follow-up Actions (routed to developer)
+
+Since the `Profiles`/bundled-`.streamDeckProfile` addition doesn't deliver its intended effect and isn't confirmed to work, it should be **reverted** rather than left in the tree as non-functional scaffolding that could mislead a future reader into thinking auto-install is implemented:
+- Revert `manifest.json`'s `Profiles` entry and remove the bundled `Gatoway.streamDeckProfile` file added in commit `01dfe90`, restoring the plain `Actions`-only manifest that was confirmed working for manual placement.
+- Correct the `stream-deck-idle-display` spec's wording (currently "SHALL render its single static idle profile... at plugin startup") to accurately describe that the idle key is shown once manually placed on a key by the user, and persists across Gatoway core disconnects/restarts thereafter — matching what was actually verified live, rather than implying zero-touch appearance.
+- Note the deferred auto-install investigation as an open item in this change's `design.md` (Risks/Open Questions) for whoever picks it up in a future change.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — All core behavior (lifecycle, connection, resilience, manual-placement rendering, no dynamic key behavior) is confirmed working correctly on real hardware. QA-009 is resolved by explicit user decision: manual placement is accepted as current behavior, and auto-install is formally deferred rather than left as a half-working attempt. This is contingent on the developer completing the revert/spec-correction follow-up above before archiving.
