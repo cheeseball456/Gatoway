@@ -35,8 +35,9 @@ const DEFAULT_LOG_MAX_FILES = 5; // per design.md D6
 
 /**
  * The per-OS user config directory Gatoway core uses by default for the auth token
- * file, absent an explicit override (design.md's Trade-off note). Follows each
- * platform's conventional location; created on first run if missing.
+ * file and the layout config file, absent an explicit override (design.md's
+ * Trade-off note; persisted-layout-config design.md D2). Follows each platform's
+ * conventional location; created on first run if missing.
  */
 function defaultConfigDir(): string {
   const home = os.homedir();
