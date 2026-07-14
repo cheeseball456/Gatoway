@@ -42,3 +42,21 @@
 - [x] 6.3 Write integration tests using test-double TCP/WS connections that register, report focus, and exchange `input_event`/`render_update` with a real running Gatoway core instance, mirroring `gatoway-core-foundation`'s real-socket testing approach
 - [x] 6.4 Write unit/integration tests for the Stream Deck plugin's generic actions (input forwarding, render-update application, no-clear-on-disconnect)
 - [ ] 6.5 Manually verify on physical Stream Deck+ hardware, using test-double app connections (no real Lightroom/xDesign yet): placing the generic actions, seeing the idle appearance by default, simulating a test app gaining focus and seeing the display update accordingly, pressing a bound key and confirming the resolved command is sent, and confirming the idle appearance returns when the test app blurs or disconnects (deferred — requires the user's real Stream Deck+ hardware and the Elgato Stream Deck application; see developer report)
+
+## 7. Live Capability Updates and Idle Icon Reset (Addendum)
+
+Added after initial implementation — closes a real gap found while explaining the
+architecture: apps had no channel to push capability display changes after registration
+(`REQUIREMENTS.md` FR-001), and the idle sweep never actually reset a position's icon back
+to default. See design.md D3/D4/D7 (amended) for the full rationale.
+
+- [ ] 7.1 Add the `capability_update` message payload type (`capabilityId`, optional `icon`/`label`/`state`)
+- [ ] 7.2 Change `render_update`'s `icon` field to accept `string | null | undefined` (`null` = explicit reset to manifest default, `undefined`/omitted = unchanged)
+- [ ] 7.3 Change `LayoutResolver.resolve()` to return a capability **id** (`string | null`), not a full `Capability` object; update the test-fixture resolver and its own tests accordingly
+- [ ] 7.4 Add a live capability lookup (given a connection and a capability id, find that capability in the connection's own stored `capabilities` array)
+- [ ] 7.5 Update `ProfileRouter`'s bound-layout sweep to resolve id → live capability via 7.4, rather than using a resolver-embedded snapshot
+- [ ] 7.6 Update `ProfileRouter`'s idle sweep to send `icon: null` explicitly, not omit `icon`
+- [ ] 7.7 Handle incoming `capability_update`: reject/no-op if the capability id isn't in the sender's own declared capabilities; otherwise sparse-merge the update into the stored record
+- [ ] 7.8 If the sender is the focused connection and the updated capability is bound to a position, immediately send a `render_update` reflecting the change
+- [ ] 7.9 Update the Stream Deck plugin's generic action renderers to treat `icon: null` as "reset to manifest default" (call `setImage()` with no argument) distinctly from an omitted `icon` field
+- [ ] 7.10 Add/adjust unit and integration tests covering: capability updates while focused (immediate re-render), while not focused (no render), for an undeclared capability id (rejected), and the idle sweep's explicit icon reset (including after a previously-focused connection's icon was shown)

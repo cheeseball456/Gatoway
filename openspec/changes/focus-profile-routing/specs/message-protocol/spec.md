@@ -31,12 +31,18 @@ column }` for `controller: "keypad"` and `{ index }` for `controller: "encoder"`
 The protocol SHALL define a `render_update` message type that Gatoway core sends to the
 Stream Deck plugin to specify what to display at a given position, with payload
 `{ controller, position, icon?, label?, state? }` using the same `position` addressing as
-`input_event`. Fields other than `controller`/`position` are optional — an update only sets
-what is changing.
+`input_event`. Fields other than `controller`/`position` are optional and sparse: an
+omitted field means "leave unchanged." `icon` additionally accepts `null` to mean
+"explicitly reset to the manifest's bundled default image" — distinct from omission, since
+these are indistinguishable once a field is dropped from the JSON payload entirely.
 
 #### Scenario: Render update changes a key's label
 - **WHEN** Gatoway core sends a `render_update` with a `controller`, `position`, and a `label` but no `icon` or `state`
 - **THEN** the Stream Deck plugin updates only the label at that position, leaving any existing icon/state unchanged
+
+#### Scenario: Render update explicitly resets the icon to default
+- **WHEN** Gatoway core sends a `render_update` with `icon: null`
+- **THEN** the Stream Deck plugin resets that position's displayed image to the manifest's bundled default, distinct from leaving a previously-set icon unchanged
 
 ### Requirement: Command Message Type
 The protocol SHALL define a `command` message type that Gatoway core sends to an
@@ -53,3 +59,19 @@ the application plugin itself decides what a given gesture means for its own cap
 #### Scenario: Resolved dial rotation sent as a command
 - **WHEN** Gatoway core resolves an `input_event` with `eventType: "rotate"` and a `delta` against a bound capability on the focused connection
 - **THEN** Gatoway core sends that connection a `command` message with the matching `capabilityId`, `eventType: "rotate"`, and the same `delta`
+
+### Requirement: Capability Update Message Type
+The protocol SHALL define a `capability_update` message type that an application plugin
+sends to push a live display change to one of its own already-declared capabilities, with
+payload `{ capabilityId: string, icon?, label?, state? }`. Fields other than
+`capabilityId` are optional and sparse, using the same unchanged/omitted-versus-`null`-reset
+semantics as `render_update`'s `icon`. An application plugin may only update capabilities it
+has itself declared.
+
+#### Scenario: Application pushes an icon/label change
+- **WHEN** an application plugin sends a `capability_update` with its own previously-declared `capabilityId` and a new `icon` and/or `label`
+- **THEN** Gatoway core updates its stored record of that capability to reflect the change
+
+#### Scenario: Update ignored for an undeclared capability id
+- **WHEN** an application plugin sends a `capability_update` referencing a `capabilityId` it did not declare at registration
+- **THEN** Gatoway core does not apply the update
