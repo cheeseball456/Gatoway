@@ -89,6 +89,37 @@ built as the API surface the future no-code mapping UI needs). `save()` writes a
 mid-write can never leave a corrupted config file — a reasonable, low-cost precaution
 given this file's contents matter for every subsequent Gatoway core startup.
 
+**D6 — The Stream Deck plugin guarantees a local default baseline, independent of
+Gatoway core (added after `/verify`, QA-014).** Live hardware testing surfaced a gap
+neither this change's D4 nor `focus-profile-routing`'s D5 covered: a full Stream Deck
+plugin process restart (not just Gatoway core alone restarting) wipes the plugin's
+in-memory "last known render state" entirely; combined with a missing/empty layout
+config (D4 correctly gives Gatoway core zero positions to sweep in that case), an
+already-placed action can be left showing an uninitialized-looking appearance
+indefinitely, with nothing to correct it. Confirmed live: the generic Dial action got
+stuck showing "Dial" (its manifest `Name`) instead of "Gatoway" (its declared default
+`Title`), while the keys only looked correct by coincidence (physical hardware image
+retention, not anything the design actually guarantees).
+
+Fix: the generic Key/Dial actions' `onWillAppear` handler now applies a hardcoded local
+baseline — the manifest's own declared default label and icon — immediately whenever no
+remembered render state exists yet for that position, *before and independent of*
+anything Gatoway core sends. This restores the original static-Idle-action's reliable
+"always shows something sane immediately" guarantee (which generic actions lost when
+they stopped hardcoding their own content, per AD-8), without reintroducing any
+app-specific or Gatoway-core-dependent knowledge into the plugin — it's a pure,
+one-time, local fallback. A subsequent real `render_update` from Gatoway core (once it
+starts, loads whatever config exists, and does its own sweep) still overrides this local
+baseline exactly as before; this fix does not change anything about how `render_update`
+itself is applied, only what happens in its absence.
+
+This is scoped entirely to the Stream Deck plugin (`genericKeyRenderer.ts`/
+`genericDialRenderer.ts` and their callers) — no change to `LayoutResolver`, `LayoutStore`,
+or any Gatoway-core-side behavior. D4's "missing config = zero bindings" decision stands
+unchanged; this fix addresses the *plugin's own* responsibility to never look
+uninitialized, which turned out to be a real gap independent of what Gatoway core does or
+doesn't know.
+
 ## Risks / Trade-offs
 
 - [Risk] Building a save/write API with no caller in this change risks the API shape being

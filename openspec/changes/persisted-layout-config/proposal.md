@@ -42,11 +42,13 @@ correctly but can never be bound to anything real.
 - `layout-persistence`: loading, in-memory representation, and saving of the per-plugin-type position-to-capability layout config as a local JSON file, including safe fallback behavior for a missing or malformed file.
 
 ### Modified Capabilities
-None. `profile-routing`'s existing requirements describe behavior in terms of "a
-connection" having "a capability bound... at the reported position" — that behavior is
-unchanged; only the internal mechanism resolving it (a real config file keyed by plugin
-type, instead of an in-code fixture) changes, which is an implementation detail this
-change's own design covers, not a change to `profile-routing`'s specified behavior.
+- `stream-deck-idle-display`: amended after live `/verify` testing (QA-014) surfaced a real gap — a full Stream Deck plugin restart combined with a missing/empty layout config left an already-placed action's display stuck in an uninitialized-looking state indefinitely, since neither this change's "missing config = zero bindings" behavior nor the existing persistence guarantee (which depends on the plugin's own in-memory state, wiped by a full restart) covered that combination. Adds a requirement that the plugin guarantee a sane local default independent of Gatoway core, closing the gap.
+
+`profile-routing`'s existing requirements describe behavior in terms of "a connection"
+having "a capability bound... at the reported position" — that behavior is unchanged;
+only the internal mechanism resolving it (a real config file keyed by plugin type,
+instead of an in-code fixture) changes, which is an implementation detail this change's
+own design covers, not a change to `profile-routing`'s specified behavior.
 
 ## Impact
 
