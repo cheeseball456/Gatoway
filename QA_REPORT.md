@@ -933,3 +933,102 @@ Reproduced the identical sequence that originally surfaced QA-014: the layout co
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — QA-014 is confirmed resolved by direct reproduction of the original failure scenario, not just by trusting the fix's own unit tests. Both the core file-backed binding mechanism (this change's primary purpose) and the local-default-baseline fix are now fully verified on real hardware. This change is ready for `doc-writer` (the layout config schema documentation design.md anticipates, plus the already-open `docs/PROTOCOL.md` gaps if any remain) and `/opsx:archive`.
+
+---
+---
+
+# Static Review Session — 2026-07-14 — `wildcard-origin-allowlist`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `wildcard-origin-allowlist` (branch `wildcard-origin-allowlist`, HEAD `e82ed94`) — `isOriginAllowed()`'s new trailing-wildcard prefix-match support in `gatoway-core/src/auth/originAllowlist.ts`, its new unit and integration tests, `docs/PROTOCOL.md`/`gatoway-core/README.md`'s documentation updates, and `ARCHITECTURE.md` AD-5 (amended v1.5). Reviewed against `proposal.md`, `design.md` (D1-D3), the `plugin-authentication` capability delta spec, and `tasks.md`. Full `gatoway-core` test suite (127 tests) and typecheck were re-run and pass.
+
+## Summary
+
+This is a small, correctly-scoped change with no Critical or Major issues. The core logic — `entry.endsWith("*")` selecting a prefix match via `origin.startsWith(entry.slice(0, -1))`, falling through to the pre-existing exact `entry === origin` check otherwise — correctly handles every edge case this review was specifically asked to check: a bare `*` entry matches everything (by construction, not special-cased, exactly as `design.md` 1.2 and `tasks.md` 1.2 intend and as a dedicated test confirms); an entry with `*` anywhere other than the final character is never treated as a wildcard at all (confirmed by code trace — `endsWith("*")` only inspects the last character, so a mid-string `*` falls straight to the unchanged exact-match branch), correctly keeping the change scoped to a single trailing wildcard per `design.md` D1; an empty-string entry can never match a real origin (and is filtered out of the allowlist entirely upstream by `config.ts`'s pre-existing `parseAllowlist`, so it's doubly unreachable in production); and no case normalization is applied anywhere in the matching path, which is unchanged from the pre-existing exact-match behavior (not a regression) and is a low real-world risk since both Chrome extension ids and Firefox's RFC 4122 UUIDs are always lowercase and browsers canonicalize scheme/host to lowercase in the `Origin` header regardless. The full diff is genuinely minimal and additive: only `originAllowlist.ts`'s matching logic changed (15 lines), the pre-existing `entry === origin`/`allowlist.includes(origin)` comparison is preserved byte-for-byte in the non-wildcard branch, and nothing else in the WebSocket upgrade path, `config.ts`'s parsing, or any other capability was touched — existing exact-match behavior is genuinely unchanged, not just claimed unchanged.
+
+The new integration test (`wsListener.test.ts`, beyond what `tasks.md` explicitly required) is a real, meaningful addition: it starts a genuine `startWsListener()` instance and drives a real `ws` client through an actual HTTP-upgrade handshake with `origin: "moz-extension://some-per-install-uuid"`, asserting the resulting connection reaches `authenticated` state via a real `ConnectionManager` — this exercises the real WebSocket upgrade path (header extraction, `isOriginAllowed()` call site, state transition), not just the unit-level function, and correctly mirrors the pre-existing exact-match sibling test's structure.
+
+Two Minor findings and a few non-blocking Observations are noted below; none of them touch the core matching logic, which is sound.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-015 | Minor | `gatoway-core/test/unit/originAllowlist.test.ts` | No test asserts that an entry with `*` in a non-trailing position (e.g. `moz-extension://*.example`) is treated as an exact-match literal, not a wildcard — the one specific out-of-scope-boundary case this change's own `design.md` D1 exists to guard, confirmed correct today only by code trace | Open |
+| QA-016 | Minor | `openspec/changes/wildcard-origin-allowlist/tasks.md:12` | Task 2.5 ("Manually verify: run the existing manual WebSocket test client with `GATOWAY_ALLOWED_ORIGINS=moz-extension://*`...") is marked `[x]` complete with no evidence trail (no note in `tasks.md`, the commit message, or elsewhere) describing what was actually run or observed | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+
+---
+
+## Issue Detail
+
+### QA-015 · Minor · `gatoway-core/test/unit/originAllowlist.test.ts`
+
+**What:** `design.md` D1 is explicit that only a *single trailing* wildcard is supported — "no wildcard positions other than a single trailing one." The implementation correctly enforces this (`entry.endsWith("*")` only ever inspects the final character of an entry; anything with a `*` elsewhere in the string falls straight through to the unchanged `entry === origin` exact-match branch, which will essentially never match a real origin unless the origin itself literally contains a `*` character). I confirmed this is correct by direct code trace and manual reasoning (e.g. `moz-extension://*.example` does not end in `*`, so `isOriginAllowed("moz-extension://foo.example", ["moz-extension://*.example"])` returns `false`, and `isOriginAllowed("moz-extension://*.example", ["moz-extension://*.example"])` — an origin that happens to literally contain `*` — would return `true`, both consistent with "exact match, no wildcard interpretation"). No test in `originAllowlist.test.ts` exercises this case, however — the four new wildcard tests cover a trailing wildcard, mixed exact+wildcard lists, and a bare `*`, but none cover a non-trailing `*`.
+
+**Scenario:** A future refactor of `isOriginAllowed()` (e.g. switching from `entry.endsWith("*")` to a naive `entry.includes("*")` check, or introducing a small regex-based implementation for readability) could silently widen the matching rule beyond the documented single-trailing-wildcard scope, and nothing in the test suite would catch it.
+
+**Evidence:** `grep -n "\*" gatoway-core/test/unit/originAllowlist.test.ts` shows only trailing-`*` and bare-`*` entries; no entry like `"moz-extension://*.example"` or `"foo*bar"` appears anywhere in the test file.
+
+**Impact:** Low today — the current implementation is correct, confirmed by direct trace, not merely assumed. But this is exactly the boundary `design.md` D1 was written to hold the line on ("no wildcard positions other than a single trailing one"), and it's the one review area explicitly called out as needing verification that a `*` anywhere else is *not* silently treated as a wildcard; a regression here would silently expand the security-relevant matching rule with no test failure to flag it.
+
+**Suggested fix direction:** Add a unit test asserting an entry with a non-trailing `*` (e.g. `"moz-extension://*.example"` or `"foo*bar"`) is treated as a literal exact-match string and does not match any origin sharing only a partial prefix/suffix around the `*`.
+
+**Root-cause level:** Code (test coverage gap only — the implementation itself is correct as traced).
+
+---
+
+### QA-016 · Minor · `openspec/changes/wildcard-origin-allowlist/tasks.md:12`
+
+**What:** Task 2.5 reads: "Manually verify: run the existing manual WebSocket test client with `GATOWAY_ALLOWED_ORIGINS=moz-extension://*` and confirm both a `moz-extension://<uuid-A>` and `moz-extension://<uuid-B>` origin are both accepted, while a non-matching origin is still refused" and is checked off (`[x]`) in the commit that implements this change. Unlike other manual-verification task notes elsewhere in this project's history (e.g. `persisted-layout-config` task 4.4's tasks.md annotation explicitly describing what was confirmed against a real, standalone-launched process), there is no annotation on this line, no note elsewhere in `tasks.md`, and no mention in the commit message (`e82ed94`) of what was actually run or observed.
+
+**Scenario:** A reader (architect, future QA session, or `/verify`) takes this checkbox at face value and assumes the live manual-client check already happened, when — based on the available evidence — it's equally possible this box was checked as a matter of course alongside the (genuinely completed) automated-test tasks in the same group.
+
+**Evidence:** `git log e82ea94 --format=%B` shows no reference to a manual client run; `tasks.md`'s diff shows only the checkbox flipping from `[ ]` to `[x]` with no added prose, in contrast to this project's own established pattern (seen repeatedly elsewhere in this report) of disclosing exactly what a manual check did or didn't confirm.
+
+**Impact:** Low — this is the same category of gap this project's own QA history has flagged before (`stream-deck-plugin-skeleton`'s QA-008: an inaccurate/unverifiable self-reported task-completion claim), and the underlying automated coverage (unit tests 2.1-2.4, plus the new real-upgrade integration test) already gives good confidence the behavior is correct even without this specific manual run. But the claim itself is unverifiable from the artifacts alone.
+
+**Suggested fix direction:** Either confirm and briefly document what was actually observed when task 2.5 was run (a one-line note, matching this project's own established convention), or treat it as not yet done and pick it up during `/verify` alongside whatever other manual/hardware checks that session covers.
+
+**Root-cause level:** Process (task-tracking accuracy), not a functional defect — the underlying feature is already well-covered by the automated real-upgrade integration test regardless of whether this specific manual step was performed.
+
+---
+
+## Areas Specifically Verified (per review scope)
+
+- **Bare `*` entry:** Confirmed correct and genuinely not special-cased. `"*".endsWith("*")` is `true`; `"*".slice(0, -1)` is `""`; `origin.startsWith("")` is `true` for any string — so a bare `*` matches everything purely as a fallout of the general rule, exactly as `design.md` 1.2 and `tasks.md` 1.2 require, and a dedicated test (`"treats a bare '*' entry as matching any origin"`) confirms this against two different origins.
+- **Non-trailing `*` is NOT treated as a wildcard:** Confirmed correct by code trace (see QA-015) — `entry.endsWith("*")` is the only branch condition, so any entry with `*` elsewhere always falls to the unchanged exact-match comparison. This is the one area of this review's specific scope where the behavior is correct but under-tested; see QA-015.
+- **Empty-string entry:** Confirmed harmless. At the `isOriginAllowed()` level, `"".endsWith("*")` is `false`, so it falls to `"" === origin`; since `origin` is guaranteed non-falsy by the earlier `if (!origin) return false` guard (unchanged from before this diff), an empty-string entry can never match a real request. It's also unreachable in production regardless, since `config.ts`'s pre-existing `parseAllowlist()` (untouched by this diff) already filters out zero-length entries after trimming (`gatoway-core/src/config.ts:67-75`).
+- **Case sensitivity:** Confirmed no normalization occurs anywhere in this path — `wsListener.ts:103`'s `request.headers.origin` is passed through verbatim (Node lowercases header *names*, not values), and both the exact-match and prefix-match comparisons in `isOriginAllowed()` are case-sensitive string operations. This is unchanged from the pre-existing exact-match-only implementation (not a regression introduced here), and is a low real-world risk in practice: browsers canonicalize a URL's scheme and host to lowercase before setting `Origin`, so a real Chrome extension id or Firefox UUID will never arrive in unexpected casing. Noted as an Observation, not a defect.
+- **Existing exact-match behavior is genuinely unchanged:** Confirmed by reading the full diff, not just the new wildcard branch — the non-wildcard branch (`entry === origin`) is character-for-character the same comparison the old `allowlist.includes(origin)` performed (`Array.prototype.includes` uses `===`/SameValueZero semantics), just relocated inside `.some()`'s callback. No other file in the diff touches the WebSocket upgrade flow, `ConnectionManager`, or `config.ts`'s allowlist parsing.
+- **New integration test exercises the real upgrade path, not just the unit function:** Confirmed. `wsListener.test.ts`'s new wildcard test starts a genuine `startWsListener()` instance and a real `ws` client with the `origin` option (which sets the actual `Origin` request header on the HTTP upgrade), and asserts the resulting `ConnectionManager` record reaches `authenticated` state — the same structure as the pre-existing exact-match sibling test, and a materially different (and more convincing) check than merely calling `isOriginAllowed()` directly.
+- **Documentation accuracy, including the "single trailing wildcard only" scope limitation:** `docs/PROTOCOL.md` explicitly states "Only a single trailing `*` is supported — this is a prefix match, not a general glob/regex," directly and clearly documenting the scope boundary. `gatoway-core/README.md`'s `GATOWAY_ALLOWED_ORIGINS` table entry and its "Auth token file" section (where the fuller Chrome-vs-Firefox guidance now lives) both accurately describe trailing-wildcard-vs-exact-match behavior and give a concrete combined example (`GATOWAY_ALLOWED_ORIGINS=chrome-extension://<id>,moz-extension://*`); README's version doesn't repeat PROTOCOL.md's explicit "not a general glob/regex" wording verbatim but isn't inaccurate — it consistently describes the behavior as "trailing-wildcard prefix match" throughout. `ARCHITECTURE.md` AD-5's v1.5 amendment accurately summarizes the change, its rationale (Firefox's per-install UUID), and correctly lists full glob/regex matching as a rejected alternative, matching `design.md` D1.
+
+---
+
+## Observations
+
+- `gatoway-core/README.md`'s new Chrome-vs-Firefox guidance (lines 123-137) was added under the existing `### Auth token file` heading, which now documents two conceptually distinct authentication mechanisms (the TCP token file, and the unrelated WebSocket Origin allowlist) under a heading name that no longer fully describes its own contents. The cross-reference from the `GATOWAY_ALLOWED_ORIGINS` table row (`see [Auth token file](#auth-token-file) below`) is technically correct — the anchor does exist and does contain the relevant content — but a reader following it to learn about Origin allowlisting lands under a heading titled after a different mechanism entirely. Not a defect; a minor structural/naming clarity nit the architect or `doc-writer` may want to tidy up (e.g. a dedicated `### WebSocket Origin allowlist` subsection) whenever this section is next touched.
+- `design.md`'s own Risk entry ("a malformed wildcard entry could be configured by mistake... mitigation: document the expected shape clearly") is honored by the documentation but, consistent with the explicit decision not to add runtime validation, means a typo like `moz-extension://**` (double trailing asterisk) silently degenerates to a literal-`*`-containing exact-match prefix that will essentially never match any real origin — a safe (fail-closed) direction for a typo, not a security risk, but worth the architect's awareness that no diagnostic (log warning, startup validation) exists to catch this class of misconfiguration; purely cosmetic/UX, matching `design.md`'s explicit "not adding validation ceremony" trade-off.
+
+---
+
+## Testing Coverage Assessment
+
+The five new unit tests (`originAllowlist.test.ts`) directly cover every scenario `tasks.md` 2.1-2.4 asked for, plus the bare-`*` case from task 1.2, and the existing pre-wildcard tests (exact match, non-match, undefined origin, empty allowlist) are untouched and still pass — confirming no regression in the existing contract. The new integration test (`wsListener.test.ts`) goes beyond `tasks.md`'s literal requirements by exercising the real WebSocket upgrade path end-to-end for a wildcard entry, mirroring the existing exact-match integration test's structure closely (though it does not additionally round-trip a `register`/`register_ack` message the way the exact-match sibling test does — a minor asymmetry, not a gap, since confirming `authenticated` state is sufficient to prove the Origin-matching path itself works, and the register/ack round-trip is already proven generically by the sibling test).
+
+The one confirmed gap is QA-015: no test guards the "a `*` anywhere other than the final character is not treated as a wildcard" boundary, despite this being the specific out-of-scope case `design.md` D1 exists to hold the line on. The behavior is correct today (confirmed by trace), but unguarded against regression.
+
+Full suite: 127/127 `gatoway-core` tests pass (`npm test`), `tsc --noEmit` clean. No stream-deck-plugin changes in this diff, so that package's suite is unaffected and was not re-run as part of this review.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ⚠️ **Conditional pass** — No Critical or Major issues. The core wildcard-matching logic is correct for every edge case this review specifically scrutinized (bare `*`, non-trailing `*`, empty-string entries, case sensitivity), existing exact-match behavior is genuinely unchanged (confirmed via full-diff review, not just the touched function), and the new integration test meaningfully exercises the real WebSocket upgrade path rather than just the unit-level function. Documentation accurately describes the implemented behavior, including the "single trailing wildcard only, not full glob" scope limitation. Two Minor, non-blocking findings are open: QA-015 (missing regression test for the non-trailing-`*`-is-not-a-wildcard boundary — code is correct, coverage is not) and QA-016 (an unverifiable manual-verification task-completion claim in `tasks.md`, a process/tracking-accuracy gap rather than a functional one). Neither blocks progress; the architect may schedule either now or defer QA-015 to a follow-up test-hardening pass, and may route QA-016 to `/verify` for a live confirmation of the manual WebSocket client check. This change is ready to proceed to `/verify` and, following that, `doc-writer` (for the minor README section-naming tidy-up, at the architect's discretion) and `/opsx:archive`.
