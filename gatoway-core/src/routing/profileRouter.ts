@@ -5,11 +5,13 @@ import type { ConnectionRecord } from "../connection/types.js";
 import type { FocusTracker } from "../focus/focusTracker.js";
 import type { Logger } from "../logging/logger.js";
 import type {
+  CapabilityUpdatePayload,
   CommandPayload,
   FocusPayload,
   InputEventPayload,
   RenderUpdatePayload,
 } from "../protocol/messages.js";
+import { findCapability } from "./capabilityLookup.js";
 import type { LayoutResolver } from "./layoutResolver.js";
 
 /**
@@ -31,10 +33,12 @@ export interface ProfileRouterOptions {
 }
 
 /**
- * Implements the `profile-routing` capability (design.md D3/D4): resolves incoming
- * `input_event`s against the currently-focused connection's bound capability, and keeps
- * the Stream Deck plugin's display in sync with focus changes - the focused
- * connection's bound layout, or the built-in idle appearance when nothing is focused.
+ * Implements the `profile-routing` capability (design.md D3/D4/D7): resolves incoming
+ * `input_event`s against the currently-focused connection's bound capability, keeps the
+ * Stream Deck plugin's display in sync with focus changes - the focused connection's
+ * bound layout, or the built-in idle appearance when nothing is focused - and applies
+ * live `capability_update`s a connection pushes for its own already-declared
+ * capabilities, immediately re-rendering when the update affects what's on screen.
  */
 export class ProfileRouter implements ProtocolRouter {
   private readonly manager: ConnectionManager;
@@ -110,8 +114,8 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
 
-    const capability = this.layoutResolver.resolve(focusedId, payload.controller, payload.position);
-    if (!capability) {
+    const capabilityId = this.layoutResolver.resolve(focusedId, payload.controller, payload.position);
+    if (!capabilityId) {
       this.logger.info(
         {
           event: "input_event_ignored",
@@ -121,6 +125,26 @@ export class ProfileRouter implements ProtocolRouter {
           position: payload.position,
         },
         "ignoring input_event: focused connection has no capability bound at this position",
+      );
+      return;
+    }
+
+    // design.md D3 (amended): the layout only binds a capability *id* to this position
+    // - the live capability itself must actually be among the focused connection's own
+    // declared capabilities. A stale/unknown id here is treated exactly like an
+    // unresolved binding, never a crash (profile-routing spec).
+    const capability = findCapability(focusedConnection, capabilityId);
+    if (!capability) {
+      this.logger.info(
+        {
+          event: "input_event_ignored",
+          reason: "bound_capability_undeclared",
+          focusedConnectionId: focusedId,
+          capabilityId,
+          controller: payload.controller,
+          position: payload.position,
+        },
+        "ignoring input_event: focused connection has not declared the capability bound at this position",
       );
       return;
     }
@@ -135,6 +159,74 @@ export class ProfileRouter implements ProtocolRouter {
       connectionId: focusedConnection.id,
       payload: commandPayload,
     });
+  }
+
+  /**
+   * Handles an incoming `capability_update` (design.md D7, task-group-7 addendum): a
+   * connection pushing a live display change to one of its own already-declared
+   * capabilities. Looks the target capability up within the *sender's own* connection
+   * record only - an app can never update another connection's capabilities - sparse-
+   * merges whatever fields were provided into the stored record, and, if the sender is
+   * currently focused and the capability is bound to a position, immediately re-renders
+   * that position rather than waiting for the next `input_event` or focus change.
+   */
+  handleCapabilityUpdate(connection: ConnectionRecord, payload: CapabilityUpdatePayload): void {
+    const capabilityId = payload?.capabilityId;
+    const capability = findCapability(connection, capabilityId);
+    if (!capability) {
+      this.logger.info(
+        {
+          event: "capability_update_ignored",
+          reason: "undeclared_capability",
+          connectionId: connection.id,
+          capabilityId,
+        },
+        "ignoring capability_update: capability id is not among this connection's own declared capabilities",
+      );
+      return;
+    }
+
+    if (payload.icon !== undefined) {
+      // `null` is an explicit reset to "no icon" on the stored record (mirrors
+      // render_update's manifest-default-reset semantics); omitted means unchanged.
+      capability.icon = payload.icon === null ? undefined : payload.icon;
+    }
+    if (payload.label !== undefined) {
+      capability.label = payload.label;
+    }
+    if (payload.state !== undefined) {
+      capability.state = payload.state;
+    }
+
+    this.logger.info(
+      { event: "capability_updated", connectionId: connection.id, capabilityId },
+      "applied live capability_update to stored capability record",
+    );
+
+    if (this.focusTracker.current !== connection.id) {
+      // Stored, but this connection's layout isn't currently displayed (profile-routing
+      // spec: "Update while not focused produces no render").
+      return;
+    }
+
+    const streamDeckConnection = this.findStreamDeckConnection();
+    if (!streamDeckConnection) {
+      return;
+    }
+
+    for (const { controller, position } of this.layoutResolver.allPositions()) {
+      const boundCapabilityId = this.layoutResolver.resolve(connection.id, controller, position);
+      if (boundCapabilityId !== capabilityId) {
+        continue;
+      }
+      this.sendRenderUpdate(streamDeckConnection, {
+        controller,
+        position,
+        icon: capability.icon,
+        label: capability.label,
+        state: capability.state,
+      });
+    }
   }
 
   private broadcastForFocusChange(focusedConnectionId: string | null): void {
@@ -162,9 +254,27 @@ export class ProfileRouter implements ProtocolRouter {
     streamDeckConnection: ConnectionRecord,
     focusedConnectionId: string,
   ): void {
+    const focusedConnection = this.manager.get(focusedConnectionId);
     for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const capability = this.layoutResolver.resolve(focusedConnectionId, controller, position);
+      const capabilityId = this.layoutResolver.resolve(focusedConnectionId, controller, position);
+      if (!capabilityId) {
+        continue;
+      }
+      // design.md D3 (amended): render the *live* capability from the connection's own
+      // declared capabilities, not a static snapshot embedded in the layout resolver -
+      // this is what actually makes capability_update (D7) able to change what renders.
+      const capability = findCapability(focusedConnection, capabilityId);
       if (!capability) {
+        this.logger.info(
+          {
+            event: "bound_capability_undeclared",
+            focusedConnectionId,
+            capabilityId,
+            controller,
+            position,
+          },
+          "layout resolver bound a capability id the focused connection has not declared; skipping render for this position",
+        );
         continue;
       }
       const payload: RenderUpdatePayload = {
@@ -172,6 +282,7 @@ export class ProfileRouter implements ProtocolRouter {
         position,
         icon: capability.icon,
         label: capability.label,
+        state: capability.state,
       };
       this.sendRenderUpdate(streamDeckConnection, payload);
     }
@@ -179,7 +290,17 @@ export class ProfileRouter implements ProtocolRouter {
 
   private sendIdleSweep(streamDeckConnection: ConnectionRecord): void {
     for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const payload: RenderUpdatePayload = { controller, position, label: IDLE_LABEL, state: 0 };
+      // design.md D4 (amended): explicitly reset `icon` to `null` rather than omitting
+      // it - an omitted field means "unchanged" (sparse-update semantics), so an idle
+      // sweep that never mentions `icon` would leave a previously-focused connection's
+      // capability icon visually stuck after focus clears.
+      const payload: RenderUpdatePayload = {
+        controller,
+        position,
+        icon: null,
+        label: IDLE_LABEL,
+        state: 0,
+      };
       this.sendRenderUpdate(streamDeckConnection, payload);
     }
   }

@@ -1,4 +1,4 @@
-import type { Capability, Controller, Position } from "../protocol/messages.js";
+import type { Controller, Position } from "../protocol/messages.js";
 import type { LayoutResolver, PositionRef } from "./layoutResolver.js";
 
 /**
@@ -25,29 +25,37 @@ import type { LayoutResolver, PositionRef } from "./layoutResolver.js";
  * hardware only so that a developer with a physical device can meaningfully place the
  * generic actions and see the mechanism work end to end (tasks.md 6.5) - that is not
  * itself part of this interface's contract.
+ *
+ * **Amended (design.md D3):** each binding now names only a capability *id*, not a
+ * full `Capability` object - the fixture answers "which capability id occupies this
+ * position", never "what does that capability currently look like". A connection that
+ * wants to actually render at one of these positions when focused must itself declare
+ * (at `register` time, or later via `capability_update`) a capability whose `id`
+ * matches one of the ids below; `ProfileRouter` looks that live object up from the
+ * connection's own capabilities, not from here (see `routing/capabilityLookup.ts`).
  */
 
 interface FixtureBinding {
   controller: Controller;
   position: Position;
-  capability: Capability;
+  capabilityId: string;
 }
 
 const FIXTURE_LAYOUT: readonly FixtureBinding[] = [
   {
     controller: "keypad",
     position: { row: 0, column: 0 },
-    capability: { id: "test-fixture.button.one", label: "Fixture A", type: "button" },
+    capabilityId: "test-fixture.button.one",
   },
   {
     controller: "keypad",
     position: { row: 0, column: 1 },
-    capability: { id: "test-fixture.button.two", label: "Fixture B", type: "button" },
+    capabilityId: "test-fixture.button.two",
   },
   {
     controller: "encoder",
     position: { index: 0 },
-    capability: { id: "test-fixture.dial.one", label: "Fixture Dial", type: "dial" },
+    capabilityId: "test-fixture.dial.one",
   },
 ];
 
@@ -75,7 +83,7 @@ export function createTestFixtureLayoutResolver(): LayoutResolver {
       const binding = FIXTURE_LAYOUT.find(
         (b) => b.controller === controller && samePosition(b.position, position),
       );
-      return binding ? binding.capability : null;
+      return binding ? binding.capabilityId : null;
     },
     allPositions(): PositionRef[] {
       return FIXTURE_LAYOUT.map(({ controller, position }) => ({ controller, position }));

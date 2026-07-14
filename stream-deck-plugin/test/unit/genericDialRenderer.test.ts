@@ -48,6 +48,23 @@ describe("renderGenericDial", () => {
     expect(action.setTitle).toHaveBeenCalledWith("Only label");
     expect(action.setImage).not.toHaveBeenCalled();
   });
+
+  // message-protocol spec (amended): icon: null means "reset to manifest default",
+  // applied via setImage() with no argument - distinct from an omitted icon field.
+  it("resets the image to the manifest default (calls setImage with no argument) when icon is explicitly null", async () => {
+    const action = fakeDialAction();
+    await renderGenericDial(action, { icon: null, label: "Idle" });
+
+    expect(action.setImage).toHaveBeenCalledWith(undefined);
+    expect(action.setImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls setImage when icon is omitted entirely, even though other fields are defined", async () => {
+    const action = fakeDialAction();
+    await renderGenericDial(action, { label: "Label only" });
+
+    expect(action.setImage).not.toHaveBeenCalled();
+  });
 });
 
 describe("input_event builders", () => {

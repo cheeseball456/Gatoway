@@ -10,9 +10,19 @@
 import type { Controller, Position, RenderUpdatePayload } from "@gatoway/core";
 import { positionsMatch } from "./protocolPositions.js";
 
-/** The merged (sparse-update-applied) render state last known for one position. */
+/**
+ * The merged (sparse-update-applied) render state last known for one position.
+ *
+ * `icon` distinguishes three states, mirroring `RenderUpdatePayload`'s own semantics
+ * (message-protocol spec's "Render Update Message Type", amended): `undefined` means no
+ * `render_update` has ever set an icon for this position (nothing to apply - the
+ * manifest's own default simply stands, untouched); `null` means a `render_update`
+ * explicitly reset the icon back to that manifest default; a `string` is a specific
+ * icon to display. Renderers must apply `null` and a `string` differently despite both
+ * being "defined" - see `genericKeyRenderer.ts`/`genericDialRenderer.ts`.
+ */
 export interface RenderState {
-  icon?: string;
+  icon?: string | null;
   label?: string;
   state?: number;
 }
@@ -31,11 +41,18 @@ export class RenderStore {
    * (fields it omits leave the existing value in place - message-protocol spec's
    * "Render Update Message Type": "an update only sets what is changing") and returns
    * the resulting merged state.
+   *
+   * `icon` needs its own merge rule (amended): only an *omitted* `icon`
+   * (`undefined`) means "leave unchanged" - `null` is a distinct, deliberate value
+   * ("reset to manifest default") that must be stored and later applied as such, not
+   * treated the same as omission. A plain `??` would incorrectly collapse `null` into
+   * "unchanged" (both are "nullish"), so `icon` is merged with an explicit
+   * `undefined`-only check instead of `label`/`state`'s simpler `??`.
    */
   apply(payload: RenderUpdatePayload): RenderState {
     const existing = this.findEntry(payload.controller, payload.position);
     const next: RenderState = {
-      icon: payload.icon ?? existing?.state.icon,
+      icon: payload.icon === undefined ? existing?.state.icon : payload.icon,
       label: payload.label ?? existing?.state.label,
       state: payload.state ?? existing?.state.state,
     };

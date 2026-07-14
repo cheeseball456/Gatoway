@@ -1,17 +1,27 @@
 /**
  * Payload shapes for the message-protocol capability. `register`/`register_ack`/`error`
  * were defined by `gatoway-core-foundation`; `focus`, `input_event`, `render_update`,
- * and `command` are added by `focus-profile-routing` (design.md D1) to implement AD-7
- * (self-reported focus) and AD-8 (generic, position-based action model).
+ * `command`, and `capability_update` are added by `focus-profile-routing` (design.md
+ * D1) to implement AD-7 (self-reported focus) and AD-8 (generic, position-based action
+ * model). `capability_update` was added in this change's own task-group-7 addendum
+ * (design.md D7) to satisfy `REQUIREMENTS.md` FR-001's "an application can push a state
+ * update that changes a button's icon, label, or toggle state".
  */
 
-/** A single capability (button or dial action) a plugin declares at registration. */
+/**
+ * A single capability (button or dial action) a plugin declares at registration.
+ * Stored on the connection's own `ConnectionRecord` (design.md D3/D7): no longer a
+ * write-once registration snapshot once `capability_update` (D7) can sparse-merge
+ * changes into it after registration.
+ */
 export interface Capability {
   id: string;
   label: string;
   type: "button" | "dial";
   description?: string;
   icon?: string;
+  /** Toggle/indicator state (e.g. on/off), mirroring `render_update`'s `state`. */
+  state?: number;
 }
 
 /**
@@ -93,11 +103,19 @@ export interface InputEventPayload {
  * position (design.md D1/D4, AD-8). Fields other than `controller`/`position` are
  * optional and sparse - an update only sets what is changing; omitted fields leave
  * whatever was previously displayed at that position unchanged.
+ *
+ * `icon` additionally accepts `null` (design.md D4, amended): `undefined`/omitted means
+ * "unchanged" (sparse-update semantics - indistinguishable from a dropped field once
+ * this crosses the wire as JSON), while `null` means "explicitly reset to the
+ * manifest's bundled default image", matching the Elgato Stream Deck SDK's own
+ * `setImage()` call with no argument. Without this distinct value, the idle sweep would
+ * have no way to actually clear a previously-focused connection's capability icon - it
+ * would either have to omit `icon` (leaving it stuck) or invent a fake sentinel string.
  */
 export interface RenderUpdatePayload {
   controller: Controller;
   position: Position;
-  icon?: string;
+  icon?: string | null;
   label?: string;
   state?: number;
 }
@@ -107,17 +125,37 @@ export interface RenderUpdatePayload {
  * `input_event` has been resolved against that connection's bound capability
  * (profile-routing spec: "Input Event Resolution Against the Focused Connection").
  *
- * NOTE: design.md's D1 enumerates exactly three new message types (`focus`,
- * `input_event`, `render_update`) and does not itself define this fourth type, even
- * though the `profile-routing` spec explicitly requires Gatoway core to "forward a
- * corresponding command to that connection" once resolution succeeds. This shape is a
- * minimal, implementation-level fill of that gap (same envelope, no new framing),
- * added here so the resolution behavior the spec requires is actually implementable -
- * flagged back to the design/architecture level rather than left silently unaddressed
- * (see this change's developer report).
+ * design.md D1 originally enumerated only three new message types (`focus`,
+ * `input_event`, `render_update`) and did not itself define this fourth type, even
+ * though the `profile-routing` spec explicitly required Gatoway core to "forward a
+ * corresponding command to that connection" once resolution succeeded - a gap flagged
+ * during this change's initial implementation and since ratified in design.md D1
+ * (amended).
  */
 export interface CommandPayload {
   capabilityId: string;
   eventType: InputEventType;
   delta?: number;
+}
+
+/**
+ * Sent by an application plugin to push a live display change to one of its own
+ * already-declared capabilities, at any time after registration (design.md D7). This is
+ * the piece that actually satisfies `REQUIREMENTS.md` FR-001's "an application can push
+ * a state update that changes a button's icon, label, or toggle state" - nothing built
+ * before this change's task-group-7 addendum implemented it; capability data was a
+ * write-once registration snapshot until now.
+ *
+ * Fields other than `capabilityId` are optional and sparse, using the same
+ * unchanged-if-omitted / explicit-`null`-resets-icon semantics as `render_update`'s
+ * `icon` field. An application plugin may only update capabilities it has itself
+ * declared - enforced by looking `capabilityId` up within the *sender's own*
+ * `ConnectionRecord.capabilities`, never accepted at face value (profile-routing spec:
+ * "Update ignored for an undeclared capability id").
+ */
+export interface CapabilityUpdatePayload {
+  capabilityId: string;
+  icon?: string | null;
+  label?: string;
+  state?: number;
 }

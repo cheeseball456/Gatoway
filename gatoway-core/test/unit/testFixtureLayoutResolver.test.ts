@@ -2,20 +2,20 @@ import { describe, expect, it } from "vitest";
 import { createTestFixtureLayoutResolver } from "../../src/routing/testFixtureLayoutResolver.js";
 
 describe("createTestFixtureLayoutResolver", () => {
-  it("resolves a bound keypad position for any connection ID", () => {
+  it("resolves a bound keypad position to its capability id, for any connection ID", () => {
     const resolver = createTestFixtureLayoutResolver();
 
-    const capability = resolver.resolve("any-connection", "keypad", { row: 0, column: 0 });
+    const capabilityId = resolver.resolve("any-connection", "keypad", { row: 0, column: 0 });
 
-    expect(capability).toEqual({ id: "test-fixture.button.one", label: "Fixture A", type: "button" });
+    expect(capabilityId).toBe("test-fixture.button.one");
   });
 
-  it("resolves a bound encoder position for any connection ID", () => {
+  it("resolves a bound encoder position to its capability id, for any connection ID", () => {
     const resolver = createTestFixtureLayoutResolver();
 
-    const capability = resolver.resolve("any-connection", "encoder", { index: 0 });
+    const capabilityId = resolver.resolve("any-connection", "encoder", { index: 0 });
 
-    expect(capability).toEqual({ id: "test-fixture.dial.one", label: "Fixture Dial", type: "dial" });
+    expect(capabilityId).toBe("test-fixture.dial.one");
   });
 
   it("returns null for an unbound position", () => {

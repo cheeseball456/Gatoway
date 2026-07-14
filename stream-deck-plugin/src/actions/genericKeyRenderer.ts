@@ -25,6 +25,12 @@ export interface GenericKeyLike {
  * "reset to nothing" (message-protocol spec's sparse-update semantics), so it must
  * never be applied as an explicit reset. Does nothing if no render state exists yet for
  * this position (nothing has been rendered - the manifest's own default state stands).
+ *
+ * `icon` is handled specially (amended): `undefined` means "never touch the image" (no
+ * call at all); `null` means "explicitly reset to the manifest's bundled default",
+ * applied by calling `setImage()` with no argument - the Elgato SDK's own documented way
+ * to do exactly that; a `string` sets that specific icon. `null` and `undefined` must
+ * not be collapsed together, unlike a simple falsy/nullish check would do.
  */
 export async function renderGenericKey(
   action: GenericKeyLike,
@@ -37,7 +43,7 @@ export async function renderGenericKey(
     await action.setTitle(state.label);
   }
   if (state.icon !== undefined) {
-    await action.setImage(state.icon);
+    await action.setImage(state.icon === null ? undefined : state.icon);
   }
   if (state.state !== undefined) {
     await action.setState(state.state);

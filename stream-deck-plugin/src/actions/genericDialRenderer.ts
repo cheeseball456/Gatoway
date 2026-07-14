@@ -20,6 +20,11 @@ export interface GenericDialLike {
  * Applies the given render state to a dial instance. Only `label`/`icon` apply -
  * unlike keys, dials have no two-state (`setState`) concept in the Elgato SDK, so a
  * `render_update`'s `state` field is simply not applicable here.
+ *
+ * `icon` is handled the same way as `genericKeyRenderer.ts`'s `renderGenericKey`
+ * (amended): `undefined` means never touch the image; `null` means explicitly reset to
+ * the manifest's bundled default via `setImage()` with no argument; a `string` sets
+ * that specific icon.
  */
 export async function renderGenericDial(
   action: GenericDialLike,
@@ -32,7 +37,7 @@ export async function renderGenericDial(
     await action.setTitle(state.label);
   }
   if (state.icon !== undefined) {
-    await action.setImage(state.icon);
+    await action.setImage(state.icon === null ? undefined : state.icon);
   }
 }
 

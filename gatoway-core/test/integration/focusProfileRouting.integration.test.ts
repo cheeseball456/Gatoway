@@ -8,7 +8,21 @@ import { FocusTracker } from "../../src/focus/focusTracker.js";
 import { createTestFixtureLayoutResolver } from "../../src/routing/testFixtureLayoutResolver.js";
 import { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "../../src/routing/profileRouter.js";
 import { encodeMessage, type GatowayMessage } from "../../src/protocol/envelope.js";
+import type { Capability } from "../../src/protocol/messages.js";
 import { encodeNdjsonLine, NdjsonDecoder } from "../../src/protocol/tcpFraming.js";
+
+/**
+ * The test-fixture layout resolver (`testFixtureLayoutResolver.ts`) only ever binds
+ * capability *ids* to positions (design.md D3, amended) - a test-double app connection
+ * must actually declare capabilities under these same ids for the bound layout sweep
+ * and resolved commands to carry any real data, exactly as a real application plugin
+ * would need to.
+ */
+const FIXTURE_CAPABILITIES: Capability[] = [
+  { id: "test-fixture.button.one", label: "Fixture A", type: "button", icon: "fixture-a.png" },
+  { id: "test-fixture.button.two", label: "Fixture B", type: "button", icon: "fixture-b.png" },
+  { id: "test-fixture.dial.one", label: "Fixture Dial", type: "dial" },
+];
 
 /**
  * Integration test using test-double TCP connections (tasks.md 6.3): no real second
@@ -60,12 +74,13 @@ class TestDoubleClient {
     port: number,
     token: string,
     pluginType: string,
+    capabilities: Capability[] = [],
   ): Promise<TestDoubleClient> {
     const socket = await connectTo(port);
     const client = new TestDoubleClient(socket);
     client.send({
       type: "register",
-      payload: { pluginType, capabilities: [], token },
+      payload: { pluginType, capabilities, token },
     });
     await client.waitForMessageType("register_ack");
     return client;
@@ -130,6 +145,9 @@ describe("focus tracking + profile routing (integration)", () => {
     expect(idleUpdates).toHaveLength(3);
     for (const update of idleUpdates) {
       expect((update.payload as { label?: string }).label).toBe("Gatoway");
+      // design.md D4 (amended): the idle sweep explicitly resets icon to null rather
+      // than omitting it, so a previously-focused connection's icon never stays stuck.
+      expect((update.payload as { icon?: string | null }).icon).toBeNull();
     }
   });
 
@@ -140,7 +158,7 @@ describe("focus tracking + profile routing (integration)", () => {
     clients.push(streamDeck);
     await streamDeck.waitForMessageType("render_update", 3); // initial idle sweep
 
-    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app");
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
     clients.push(app);
 
     app.send({ type: "focus", payload: { focused: true } });
@@ -169,7 +187,7 @@ describe("focus tracking + profile routing (integration)", () => {
     clients.push(streamDeck);
     await streamDeck.waitForMessageType("render_update", 3);
 
-    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app");
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
     clients.push(app);
     app.send({ type: "focus", payload: { focused: true } });
     await streamDeck.waitForMessageType("render_update", 6);
@@ -184,6 +202,31 @@ describe("focus tracking + profile routing (integration)", () => {
     expect(app.received.filter((m) => m.type === "command")).toHaveLength(0);
   });
 
+  it("silently ignores an input_event whose bound capability id the focused application never declared", async () => {
+    const { port, token } = await start();
+
+    const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+    clients.push(streamDeck);
+    await streamDeck.waitForMessageType("render_update", 3);
+
+    // Registers with no capabilities at all - the fixture layout still binds
+    // "test-fixture.button.one" at (0,0), but this app never declared it.
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app");
+    clients.push(app);
+    app.send({ type: "focus", payload: { focused: true } });
+
+    streamDeck.send({
+      type: "input_event",
+      payload: { controller: "keypad", position: { row: 0, column: 0 }, eventType: "keyDown" },
+    });
+
+    // Give the (non-)delivery a moment: no bound-sweep entries were sendable (nothing
+    // declared), so still only the initial idle sweep's 3, and no command arrived.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(3);
+    expect(app.received.filter((m) => m.type === "command")).toHaveLength(0);
+  });
+
   it("reverts to the idle sweep when the focused application blurs", async () => {
     const { port, token } = await start();
 
@@ -191,7 +234,7 @@ describe("focus tracking + profile routing (integration)", () => {
     clients.push(streamDeck);
     await streamDeck.waitForMessageType("render_update", 3);
 
-    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app");
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
     clients.push(app);
     app.send({ type: "focus", payload: { focused: true } });
     await streamDeck.waitForMessageType("render_update", 6);
@@ -199,9 +242,11 @@ describe("focus tracking + profile routing (integration)", () => {
     app.send({ type: "focus", payload: { focused: false } });
 
     const allUpdates = await streamDeck.waitForMessageType("render_update", 9);
-    expect(allUpdates.slice(6).every((m) => (m.payload as { label?: string }).label === "Gatoway")).toBe(
-      true,
-    );
+    const idleUpdates = allUpdates.slice(6);
+    expect(idleUpdates.every((m) => (m.payload as { label?: string }).label === "Gatoway")).toBe(true);
+    // Confirms the previously-shown Fixture A/B icons don't stay stuck: the idle sweep
+    // explicitly resets icon to null rather than omitting it (design.md D4, amended).
+    expect(idleUpdates.every((m) => (m.payload as { icon?: string | null }).icon === null)).toBe(true);
   });
 
   it("reverts to the idle sweep when the focused application disconnects unexpectedly", async () => {
@@ -211,15 +256,100 @@ describe("focus tracking + profile routing (integration)", () => {
     clients.push(streamDeck);
     await streamDeck.waitForMessageType("render_update", 3);
 
-    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app");
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
     app.send({ type: "focus", payload: { focused: true } });
     await streamDeck.waitForMessageType("render_update", 6);
 
     app.close();
 
     const allUpdates = await streamDeck.waitForMessageType("render_update", 9);
-    expect(allUpdates.slice(6).every((m) => (m.payload as { label?: string }).label === "Gatoway")).toBe(
-      true,
-    );
+    const idleUpdates = allUpdates.slice(6);
+    expect(idleUpdates.every((m) => (m.payload as { label?: string }).label === "Gatoway")).toBe(true);
+    expect(idleUpdates.every((m) => (m.payload as { icon?: string | null }).icon === null)).toBe(true);
+  });
+
+  describe("capability_update (task-group-7 addendum)", () => {
+    it("immediately re-renders a bound position when the focused application pushes a capability_update", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3); // initial idle sweep
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      clients.push(app);
+      app.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6); // 3 idle + 3 bound
+
+      app.send({
+        type: "capability_update",
+        payload: { capabilityId: "test-fixture.button.one", icon: "fixture-a-active.png", label: "Fixture A!" },
+      });
+
+      const updates = await streamDeck.waitForMessageType("render_update", 7);
+      const pushed = updates[6];
+      expect(pushed.payload).toEqual({
+        controller: "keypad",
+        position: { row: 0, column: 0 },
+        icon: "fixture-a-active.png",
+        label: "Fixture A!",
+        state: undefined,
+      });
+    });
+
+    it("applies a capability_update from a non-focused connection without rendering anything", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3);
+
+      const focusedApp = await TestDoubleClient.connectAndRegister(
+        port,
+        token,
+        "test-app-a",
+        FIXTURE_CAPABILITIES,
+      );
+      clients.push(focusedApp);
+      focusedApp.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6);
+
+      const backgroundApp = await TestDoubleClient.connectAndRegister(
+        port,
+        token,
+        "test-app-b",
+        FIXTURE_CAPABILITIES,
+      );
+      clients.push(backgroundApp);
+
+      backgroundApp.send({
+        type: "capability_update",
+        payload: { capabilityId: "test-fixture.button.two", label: "Should Not Render" },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(6);
+    });
+
+    it("ignores a capability_update for a capability id the application did not declare", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3);
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      clients.push(app);
+      app.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6);
+
+      app.send({
+        type: "capability_update",
+        payload: { capabilityId: "never-declared.capability", label: "Should Not Apply" },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(6);
+    });
   });
 });

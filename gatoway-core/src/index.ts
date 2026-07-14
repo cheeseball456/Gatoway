@@ -18,6 +18,7 @@ export type { ProtocolRouter } from "./connection/protocolRouter.js";
 export type { GatowayMessage } from "./protocol/envelope.js";
 export type {
   Capability,
+  CapabilityUpdatePayload,
   CommandPayload,
   Controller,
   EncoderPosition,

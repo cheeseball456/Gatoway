@@ -53,6 +53,24 @@ describe("renderGenericKey", () => {
     expect(action.setImage).not.toHaveBeenCalled();
     expect(action.setState).not.toHaveBeenCalled();
   });
+
+  // message-protocol spec (amended): icon: null means "reset to manifest default",
+  // applied via setImage() with no argument - distinct from an omitted icon field,
+  // which must never call setImage() at all.
+  it("resets the image to the manifest default (calls setImage with no argument) when icon is explicitly null", async () => {
+    const action = fakeKeyAction();
+    await renderGenericKey(action, { icon: null, label: "Idle" });
+
+    expect(action.setImage).toHaveBeenCalledWith(undefined);
+    expect(action.setImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls setImage when icon is omitted entirely, even though other fields are defined", async () => {
+    const action = fakeKeyAction();
+    await renderGenericKey(action, { label: "Label only", state: 1 });
+
+    expect(action.setImage).not.toHaveBeenCalled();
+  });
 });
 
 describe("input_event builders", () => {

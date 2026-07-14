@@ -61,4 +61,37 @@ describe("RenderStore", () => {
     expect(store.get("keypad", { row: 0, column: 0 })?.label).toBe("Still here");
     expect(store.get("keypad", { row: 0, column: 0 })?.label).toBe("Still here");
   });
+
+  // message-protocol spec (amended): render_update's icon accepts null distinctly from
+  // omission - null means "explicit reset to manifest default", omitted means
+  // "unchanged". A naive `??` merge would wrongly collapse both into "unchanged".
+  describe("icon: null vs. omitted icon (amended semantics)", () => {
+    it("stores an explicit icon: null reset, distinct from an omitted icon", () => {
+      const store = new RenderStore();
+      store.apply({ controller: "keypad", position: { row: 0, column: 0 }, icon: "icon.png" });
+
+      const merged = store.apply({ controller: "keypad", position: { row: 0, column: 0 }, icon: null });
+
+      expect(merged.icon).toBeNull();
+    });
+
+    it("leaves a previously-set icon unchanged when a later update omits icon entirely", () => {
+      const store = new RenderStore();
+      store.apply({ controller: "keypad", position: { row: 0, column: 0 }, icon: "icon.png" });
+
+      const merged = store.apply({ controller: "keypad", position: { row: 0, column: 0 }, label: "New label" });
+
+      expect(merged.icon).toBe("icon.png");
+    });
+
+    it("leaves an explicit null reset in place across a subsequent update that omits icon", () => {
+      const store = new RenderStore();
+      store.apply({ controller: "keypad", position: { row: 0, column: 0 }, icon: "icon.png" });
+      store.apply({ controller: "keypad", position: { row: 0, column: 0 }, icon: null });
+
+      const merged = store.apply({ controller: "keypad", position: { row: 0, column: 0 }, label: "New label" });
+
+      expect(merged.icon).toBeNull();
+    });
+  });
 });

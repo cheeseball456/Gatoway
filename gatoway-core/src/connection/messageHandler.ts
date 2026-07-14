@@ -5,6 +5,7 @@ import {
   type GatowayMessage,
 } from "../protocol/envelope.js";
 import type {
+  CapabilityUpdatePayload,
   ErrorPayload,
   FocusPayload,
   InputEventPayload,
@@ -251,6 +252,11 @@ export function handleRawMessage(
 
   if (message.type === "input_event") {
     router?.handleInputEvent(connection, message.payload as InputEventPayload);
+    return;
+  }
+
+  if (message.type === "capability_update") {
+    router?.handleCapabilityUpdate(connection, message.payload as CapabilityUpdatePayload);
     return;
   }
 
