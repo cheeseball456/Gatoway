@@ -13,9 +13,12 @@ for what is deliberately not yet built.
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
 and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the detailed capability specs this
 package implements, see
-[`openspec/changes/gatoway-core-foundation/specs/`](../openspec/changes/gatoway-core-foundation/specs/)
+[`openspec/specs/`](../openspec/specs/)
 (`connection-management`, `plugin-authentication`, `message-protocol`,
-`diagnostics-logging`).
+`diagnostics-logging`) — consolidated there after the `gatoway-core-foundation` change
+that introduced them was archived; see
+[`openspec/changes/archive/2026-07-13-gatoway-core-foundation/`](../openspec/changes/archive/2026-07-13-gatoway-core-foundation/)
+for that change's original proposal and design record.
 
 ## Requirements
 
@@ -24,11 +27,16 @@ package implements, see
 
 ## Install
 
-From the `gatoway-core/` directory:
+This project is an npm workspaces monorepo (`gatoway-core` and `stream-deck-plugin` are
+sibling workspace packages). Install from the **repository root**, not from inside this
+directory:
 
 ```bash
 npm install
 ```
+
+Running `npm install` from inside `gatoway-core/` directly will not correctly link the
+`stream-deck-plugin` package's dependency on this one.
 
 ## Running it standalone (development)
 
@@ -98,7 +106,7 @@ core starts (it overwrites any previous token). It is written with owner-only
 permissions (`0600` on POSIX; an equivalent ACL restriction via `icacls` on Windows). A
 native (TCP) plugin reads this file and presents the token in its first message to
 authenticate; see [`plugin-authentication`
-spec](../openspec/changes/gatoway-core-foundation/specs/plugin-authentication/spec.md).
+spec](../openspec/specs/plugin-authentication/spec.md).
 
 WebSocket (browser-extension) connections do not use the token; they are checked
 instead against the `GATOWAY_ALLOWED_ORIGINS` allowlist at the HTTP-upgrade stage.
@@ -145,9 +153,11 @@ This foundation change defines three message types:
 - `error` (either direction): a protocol-level error report.
 
 Command and state-update message types (the actual button-press/dial-turn and
-state-push traffic) are **not yet defined** — they belong to a later change, once a
-Stream Deck plugin and at least one application plugin exist to use them. See the
-[`message-protocol` spec](../openspec/changes/gatoway-core-foundation/specs/message-protocol/spec.md)
+state-push traffic) are **not yet defined** — they belong to a later change, once at
+least one application plugin exists to use them (the Stream Deck plugin itself now
+exists — see [`../stream-deck-plugin/`](../stream-deck-plugin/) — but registers with an
+empty capability manifest and has nothing to route commands to yet). See the
+[`message-protocol` spec](../openspec/specs/message-protocol/spec.md)
 for the full envelope and payload contracts.
 
 ## Logging
@@ -171,11 +181,14 @@ npm run typecheck  # tsc --noEmit
 ## Current scope and limitations
 
 This package currently implements only the **core foundation** — the first change in
-Gatoway's delivery sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of this
-change:
+Gatoway's delivery sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of the
+most recent change:
 
-- **No Stream Deck plugin exists yet.** Nothing spawns, supervises, or displays output
-  from Gatoway core other than what you run manually as described above.
+- **A Stream Deck plugin now exists** ([`../stream-deck-plugin/`](../stream-deck-plugin/))
+  that spawns, supervises, and connects to Gatoway core as a client, and renders a
+  static idle key on physical Stream Deck hardware. It registers with an empty
+  capability manifest and forwards no button presses or dial turns — see that
+  package's own README for its scope.
 - **No application plugins exist yet** (no Lightroom adapter, no xDesign/xDender
   browser extension).
 - **No focus tracking or profile switching.** Plugins can register and authenticate,

@@ -271,3 +271,259 @@ No new Observations. The three Observations carried forward from the static revi
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — QA-005 is fixed and verified live. All planned `/verify` checks (loopback-only binding, TCP token auth accept/reject, WebSocket Origin auth accept/reject, live log content) passed under direct, hands-on observation with the user, using the real standalone entry point rather than only the automated test suite. No open Critical/Major/Minor issues remain. This change is ready for `doc-writer` and `/opsx:archive`.
+
+---
+---
+
+# Static Review Session — 2026-07-13 — `stream-deck-plugin-skeleton`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `stream-deck-plugin-skeleton` (branch `stream-deck-plugin-skeleton`, HEAD `299542f`) — the new `stream-deck-plugin/` package (child-process supervision of Gatoway core, a from-scratch NDJSON TCP client, and static idle-key rendering via the Elgato Stream Deck SDK), the small regression fix to `gatoway-core/test/integration/cliEntrypoint.test.ts`, and the new root-level npm-workspaces layout. Reviewed against `proposal.md`, `design.md`, the three new capability specs (`stream-deck-core-lifecycle`, `stream-deck-core-client`, `stream-deck-idle-display`), `tasks.md`, `REQUIREMENTS.md` v1.1, and `ARCHITECTURE.md` v1.1.
+**Prepared for:** Technical Architect
+
+## Summary
+
+The three areas this review was specifically asked to scrutinise are all sound. `design.md` D2's requirement that Gatoway core is spawned as a genuine OS child process, located via `require.resolve` rather than a hand-built path, is implemented correctly (`locateCoreEntryPoint.ts` + `coreProcessSupervisor.ts`'s real `child_process.spawn`), and directly avoids `gatoway-core-foundation`'s QA-005-class bug. The plugin's independent NDJSON encoder/decoder (`coreClient/protocol.ts`) is a byte-for-byte faithful reimplementation of `gatoway-core`'s actual wire format (`tcpFraming.ts`/`envelope.ts`) — same line-termination, same `\r\n`/empty-line handling, same envelope shape — and it correctly imports `gatoway-core`'s exported `GatowayMessage`/`RegisterPayload`/`RegisterAckPayload` types rather than guessing the shape. The restart/backoff logic (`backoff.ts`, `coreProcessSupervisor.ts`) is exponential with a sensible cap and a stability-reset window, so a genuinely crash-looping core cannot produce a restart storm, and no failure path (spawn-locate failure, spawn-throw failure, child `error`, child `exit`) is left unlogged. Task 5.3's deferral (manual hardware verification) is exactly what it claims to be — expected, not a defect — and is appropriately handed to `/verify`. The full test suite (52 + 27 = 79 tests) passes and both packages type-check clean.
+
+However, this review surfaced one new **Major**, code-level issue the manual-hardware deferral masked: **the plugin's build never produces the file its own `manifest.json` says it will run.** `manifest.json` declares `"CodePath": "bin/plugin.js"` (resolved by the real Stream Deck application relative to the `com.gatoway.streamdeck.sdPlugin/` folder), and the package's own `.gitignore` explicitly expects `com.gatoway.streamdeck.sdPlugin/bin/` to be a generated build-output directory — but no script anywhere in this change (`stream-deck-plugin/package.json`, the root `package.json`, or any bundler config) ever copies or bundles the TypeScript build's actual output (`stream-deck-plugin/dist/plugin.js`) into that location. I confirmed this by actually running the build: `com.gatoway.streamdeck.sdPlugin/bin/` does not exist anywhere in the tree, before or after `npm run build`. This is not the same gap as task 5.3's deferred hardware check — it isn't merely "no device to test on," it's that the artifact the Stream Deck application would look for is never produced at all, so the single physical-hardware-visible milestone this entire change exists to deliver (per `proposal.md`'s own "Impact" section) is currently unreachable even with real hardware in hand. See QA-006.
+
+Two further Minor findings and a couple of non-blocking Observations round out the review; none of these, nor QA-006, touch the three specifically-flagged design/protocol/backoff areas, all of which check out cleanly.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-006 | Major | `stream-deck-plugin/package.json`, `com.gatoway.streamdeck.sdPlugin/manifest.json` | No build step produces `com.gatoway.streamdeck.sdPlugin/bin/plugin.js`, the exact file `manifest.json`'s `CodePath` points to — the plugin cannot be loaded by the real Stream Deck application as currently built. | Open |
+| QA-007 | Minor | `stream-deck-plugin/src/coreClient/coreClient.ts:112-123`, `src/plugin.ts:15-30` | The plugin starts `CoreClient` immediately after `CoreProcessSupervisor.start()` returns, before the just-spawned Gatoway core has had time to write its token file or open its listener; the client's very first attempt therefore logs at `error` level for what is, in normal operation, an expected and harmless startup race — indistinguishable in the log from a genuine failure. | Open |
+| QA-008 | Minor | `openspec/changes/stream-deck-plugin-skeleton/tasks.md:34` | Task 5.3's note claims "4.3 is covered by a unit test asserting no `onKeyDown` handler exists," but no test file in the suite references `IdleAction`, `IDLE_ACTION_UUID`, or `onKeyDown` at all — the claimed test does not exist. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+
+---
+
+## Issue Detail
+
+### QA-006 · Major · `stream-deck-plugin/package.json`, `com.gatoway.streamdeck.sdPlugin/manifest.json`
+
+**What:** `com.gatoway.streamdeck.sdPlugin/manifest.json` declares:
+```json
+"CodePath": "bin/plugin.js",
+```
+The Stream Deck application resolves `CodePath` relative to the `.sdPlugin` bundle folder itself (confirmed against `@elgato/schemas`' own manifest schema, whose description for `CodePath` is "Path to the plugin's main entry point... String must reference file in the plugin directory"). `stream-deck-plugin/.gitignore` (added in this change) explicitly ignores `com.gatoway.streamdeck.sdPlugin/bin/`, showing the developer's own intent that this be a generated build-output directory. But `stream-deck-plugin/package.json`'s only build script is `"build": "tsc -p tsconfig.json"`, and `tsconfig.json` sets `"outDir": "dist"` — so the TypeScript build's actual output lands at `stream-deck-plugin/dist/plugin.js`, never at `com.gatoway.streamdeck.sdPlugin/bin/plugin.js`. No other script, in this package or the root `package.json`, copies or bundles anything into the `.sdPlugin/bin/` directory.
+
+**Scenario:** A developer follows this project's own documented workflow — `npm install` at the root, then `npm run build` — and then tries to add the Gatoway plugin to a Stream Deck profile (the exact next step `proposal.md`'s "Impact" section describes: "a developer can plug in a Stream Deck, launch this plugin, and see Gatoway core come up and an idle profile appear").
+
+**Evidence:** Reproduced directly in this project's checkout:
+```
+$ ls stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/
+imgs  manifest.json          # no bin/ directory
+$ npm run build --workspace=stream-deck-plugin
+> tsc -p tsconfig.json        # succeeds, no errors
+$ ls stream-deck-plugin/dist/
+plugin.js  plugin.d.ts  ...   # build output lands here, not in .sdPlugin/bin
+$ ls stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/
+imgs  manifest.json          # still no bin/ directory after a successful build
+```
+The official Elgato Stream Deck SDK scaffold (`streamdeck create`, documented in `@elgato/streamdeck`'s own README, which ships in `node_modules`) produces a `rollup.config.mjs` specifically to bundle `src/plugin.ts` directly into `<uuid>.sdPlugin/bin/plugin.js`; this project has no equivalent config or script anywhere.
+
+**Impact:** As built, the plugin cannot actually be installed/loaded by the real Stream Deck application at all — `CodePath` points at a file that is never produced. This isn't the same limitation task 5.3 already (correctly) deferred to `/verify` ("no physical/emulated Stream Deck hardware in this sandboxed environment"); even once real hardware is available, `/verify` will hit this same wall immediately, because there is no build artifact to load in the first place. This directly undercuts the change's own stated purpose (`proposal.md`: "the first end-to-end proof the foundation actually works outside of tests") and blocks `ARCHITECTURE.md`'s Delivery Sequence step 3 (Lightroom integration), which per its own text depends on "a running Stream Deck plugin to validate against."
+
+**Suggested fix direction:** The outcome needed is that after a normal `npm run build`, `com.gatoway.streamdeck.sdPlugin/bin/plugin.js` (or whatever file `CodePath` ultimately names) exists and is runnable by the Stream Deck application — via a bundler step (e.g. adopting the SDK's own rollup-based convention) or a simpler copy step, whichever the developer judges more maintainable given this project's existing `tsc`-only build. Not prescribing the mechanism; the requirement is only that the manifest's `CodePath` resolves to a real, current file after the documented build.
+
+**Root-cause level:** Code. `design.md` D5 explicitly left "exact... manifest conventions" for the developer to confirm against the SDK's current documentation — the manifest's shape is fine, but the packaging/build wiring the SDK's own conventions require to make that manifest usable was never completed.
+
+---
+
+### QA-007 · Minor · `stream-deck-plugin/src/coreClient/coreClient.ts`, `src/plugin.ts`
+
+**What:** `plugin.ts` calls `supervisor.start()` (which spawns the Gatoway core child process and returns immediately — the child itself is still just beginning to boot) and then, on the very next line, `coreClient.start()`, which immediately tries to read the core's token file and open a TCP connection. `CoreClient.connectOnce()`'s token-read failure path logs at `logger.error` (`"failed to read Gatoway core's auth token file; will retry"`, `event: "core_client_token_read_failed"`), and its connect-failure path also logs at `logger.error` (`event: "core_client_connect_failed"`).
+
+**Scenario:** Every normal plugin startup — not an edge case. The freshly-spawned Gatoway core process needs measurable time to start Node, generate and write its token file, and bind its TCP listener; the client's first attempt races this and will typically lose, at least on a cold start.
+
+**Evidence:** No test in this change exercises the real end-to-end startup sequence (`plugin.ts`'s actual `supervisor.start()` immediately followed by `coreClient.start()`) against a genuinely freshly-spawned core process; `coreClient.integration.test.ts` always starts a fully-running `startGatowayCore()` instance *before* constructing/starting the `CoreClient` under test, so it never exercises this specific race. Tracing the code directly: on a cold start, `readToken` will almost always hit `ENOENT` (or the connect will hit `ECONNREFUSED`) on the very first attempt, before the core process has had time to write the token file / bind the port, and this is logged at `error` level every time, indistinguishable from a genuine problem (e.g. a permissions failure or a corrupted token file).
+
+**Impact:** Every normal startup produces at least one `error`-level log line for a condition that isn't actually an error — it's an expected, harmless race the retry/backoff logic already handles correctly. This works against `REQUIREMENTS.md` FR-006's intent (detailed logging *for troubleshooting*): a log file where "everything looks like an error, always" trains whoever reads it to ignore `error`-level entries, which is exactly the failure mode `gatoway-core-foundation`'s QA-001 (transport-asymmetric logging) was concerned with from the other direction.
+
+**Suggested fix direction:** The outcome needed is that a log reader can tell "still waiting for Gatoway core to finish starting" apart from "something is actually wrong" — e.g. logging the first attempt(s) at a lower level and only escalating to `warn`/`error` after some number of consecutive failures, or after Gatoway core's own `gatoway_core_started` signal was expected but never arrived. Not prescribing the exact mechanism.
+
+**Root-cause level:** Code (log-level choice); no spec currently mandates a specific level for this path, so this is a quality/observability gap rather than a spec violation.
+
+---
+
+### QA-008 · Minor · `openspec/changes/stream-deck-plugin-skeleton/tasks.md:34`
+
+**What:** Task 5.3's note reads, in part: "Code-level equivalents were checked: 4.3 is covered by a unit test asserting no `onKeyDown` handler exists." I searched the entire `stream-deck-plugin/test/` tree for any reference to `IdleAction`, `IDLE_ACTION_UUID`, or `onKeyDown`; there are none. The only test touching the idle key's behaviour (`test/unit/idleKeyRenderer.test.ts`) exercises the extracted `renderIdleKey` function against a fake `IdleKeyLike`, asserting `setTitle` is/isn't called — it says nothing about the absence of a key-down handler, and never imports `idleAction.ts` at all.
+
+**Scenario:** A future reader (architect, QA, or another developer) relies on `tasks.md`'s own claim to conclude automated coverage exists for "no dynamic key behavior" (the `stream-deck-idle-display` spec's explicit requirement) and doesn't re-check it.
+
+**Evidence:** `grep -rn "onKeyDown\|IdleAction\|IDLE_ACTION_UUID" stream-deck-plugin/test` returns no matches. The actual guarantee that pressing the idle key sends no command rests entirely on `idleAction.ts` simply never defining an `onKeyDown` method (true by inspection today), with no regression test to catch a future change accidentally adding one.
+
+**Impact:** Low on its own — the underlying behavior (no `onKeyDown` handler) is correct today, confirmed by direct code reading. But the tracked-task claim overstates the actual verification that was done, and there is a real (if narrow) regression gap: nothing would fail if a future edit to `idleAction.ts` added an `onKeyDown` handler that violated the `stream-deck-idle-display` spec's "No dynamic key behavior" scenario.
+
+**Suggested fix direction:** Either add the test `tasks.md` already claims exists (e.g. asserting `"onKeyDown" in new IdleAction()` is `false`, or an equivalent structural check that doesn't require the decorator-under-vitest workaround), or correct the task note to accurately describe what was actually verified.
+
+**Root-cause level:** Code/process — an inaccurate self-reported coverage claim in `tasks.md`, not a functional defect in the shipped behavior.
+
+---
+
+## Areas Specifically Verified (per review scope)
+
+- **D2 — genuine child process via `require.resolve`:** Confirmed. `locateCoreEntryPoint.ts` resolves `@gatoway/core/dist/index.js` via `createRequire(...).resolve(...)`, with no hand-built path/URL string anywhere in the lookup. `coreProcessSupervisor.ts`'s `defaultSpawnChild` calls Node's real `spawn(process.execPath, [entryPointPath], ...)` — a genuine OS child process, not an in-process call to `startGatowayCore()`. `coreProcessSupervisor.integration.test.ts` proves this with an actual spawned Node process (a temp `.mjs` script) that is observed to run and restart for real, not through a mock.
+- **NDJSON protocol correctness:** Confirmed against `gatoway-core`'s actual source. `stream-deck-plugin/src/coreClient/protocol.ts`'s `encodeNdjsonLine`/`NdjsonLineDecoder` implement the identical algorithm to `gatoway-core/src/protocol/tcpFraming.ts`'s `encodeNdjsonLine`/`NdjsonDecoder` (same `\n` terminator, same `\r`-stripping, same empty-line skipping, same incremental-buffer approach), and the plugin correctly imports (rather than redeclares) `GatowayMessage`, `RegisterPayload`, and `RegisterAckPayload` from `@gatoway/core`'s public exports (`gatoway-core/src/index.ts`), so there's no risk of the plugin's local type shapes silently drifting from the real payload contracts. `coreClient.integration.test.ts` proves the whole handshake end-to-end against a real, running `startGatowayCore()` instance (real TCP socket, real token file), including a token-rejection-then-retry-then-success path.
+- **Restart/backoff soundness:** Confirmed. `backoff.ts`'s `nextBackoffDelayMs` is a pure exponential-backoff function (1s initial, doubling, capped at 30s), shared by both the process supervisor and the TCP client. `coreProcessSupervisor.ts` resets the attempt counter only after `stableAfterMs` (60s) of uptime, so a genuinely crash-looping core process asymptotically settles at retrying every 30 seconds rather than spinning tightly — no restart storm under any traced failure path. Every failure path is logged: entry-point-not-found, spawn-threw, child `error`, child `exit` (both planned-shutdown and unexpected-exit branches). The one theoretical gap I could construct — Node emitting a child `error` event without a subsequent `exit` event, which would leave the supervisor permanently stalled with no restart scheduled — has no realistic path to occurring here, since the child command is always `process.execPath` (the currently-running Node binary), which cannot itself be missing; noting this only for completeness, not as a finding.
+- **Task 5.3 deferral:** Confirmed appropriate, not a defect. The note in `tasks.md` is honest about the limitation (no physical/emulated Stream Deck device in this sandboxed environment) and correctly identifies what code-level equivalents were and weren't covered — modulo the QA-008 inaccuracy above regarding the specific `onKeyDown` claim. This deferral is exactly the kind of check `/verify` exists for.
+- **`REQUIREMENTS.md` v1.1 platform clarification:** Confirmed consistent. `manifest.json`'s `"OS"` array lists only `mac` and `windows` (no Linux entry), matching NFR 3.4's clarification that the Stream Deck plugin is Windows/Mac-only due to the vendor's own lack of a Linux build, while `gatoway-core` itself remains untouched by this change and so remains portable to Linux as before.
+- **Regression fix (`cliEntrypoint.test.ts`):** Confirmed correct and consistent with the rest of this change's approach. The prior hardcoded `node_modules/.bin/tsx` path broke once npm workspace hoisting (introduced by this same change) moved `tsx` to the repo root; the fix resolves `tsx/cli` via `require.resolve` and invokes it via `process.execPath`, mirroring the same "resolve via module resolution, not a hand-built path" principle `locateCoreEntryPoint.ts` uses, and is portable to Windows (no reliance on the `.bin` shebang shim). The full `gatoway-core` suite (52/52, including this test) still passes.
+
+---
+
+## Observations
+
+- `stream-deck-plugin/src/coreClient/coreClient.ts:210-217` — a rejected registration produces three separate, slightly overlapping log lines for what is conceptually one event: `core_client_registration_rejected` (with the actual rejection `reason`) from `handleMessage`, then `core_client_disconnected` ("connection to Gatoway core closed before registering" — technically accurate but reads oddly given registration was in fact attempted and explicitly rejected, not merely interrupted) from the `close` handler, then `core_client_retry_scheduled` from `scheduleRetry()`. Not incorrect, just verbose/slightly confusing to a log reader piecing together what happened; the architect may or may not consider this worth consolidating.
+- `stream-deck-plugin/package.json` pins `"typescript": "^7.0.2"` — consistent with `gatoway-core/package.json`'s own pin (pre-existing from `gatoway-core-foundation`, already installed and used successfully here), not a new issue introduced by this change; noting only for the architect's awareness since it's an unusually early major version.
+
+---
+
+## Testing Coverage Assessment
+
+`stream-deck-plugin`'s test suite (27 tests across 8 files) covers what's testable without physical hardware, and does so well:
+- **`stream-deck-core-lifecycle`:** unit tests (mocked `spawn`/`scheduleRestart`/`backoffMs`) cover spawn-on-start, restart-after-unexpected-exit with backoff, exit-reason logging, no-restart-after-intentional-stop, and both spawn-failure modes (entry point not located, spawn itself throws) reporting visibly rather than silently. A separate integration test spawns a genuine temporary Node script as a real child process and confirms real restart-with-backoff and real stop-suppresses-restart behavior — exactly matching `design.md`'s stated approach of following `gatoway-core-foundation`'s `cliEntrypoint.test.ts` precedent.
+- **`stream-deck-core-client`:** unit tests (mocked socket/backoff) cover the register/token-presenting handshake, `status:"ok"` handling, rejection-then-retry, and disconnect-then-retry. A separate integration test exercises the same logic against a real, running `startGatowayCore()` instance over a real TCP socket, including a realistic stale-token-then-real-token retry sequence.
+- **`stream-deck-idle-display`:** `renderIdleKey`'s title-setting behavior is unit tested for both key and non-key (dial) instances. As QA-008 notes, the "no dynamic key behavior" scenario is verified only by code inspection (absence of an `onKeyDown` method), not by an automated test, despite `tasks.md`'s claim to the contrary.
+- **Config resolution (`config.ts`) and backoff calculation (`backoff.ts`):** both fully unit tested, including edge cases (non-numeric env override, sub-1 attempt numbers, delay capping).
+
+Gaps: no test exercises the real end-to-end startup race between `supervisor.start()` and `coreClient.start()` as `plugin.ts` actually sequences them (see QA-007); no test guards the "no `onKeyDown` handler" requirement (QA-008); and — as `design.md`'s own Risks section already anticipates and defers to `/verify` — nothing in this suite can confirm actual on-device rendering, which requires physical or emulated Stream Deck hardware and is out of scope for static review.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ❌ **Requires fixes** — QA-006 is a Major, code-level issue that blocks this change's core deliverable (an installable, hardware-loadable Stream Deck plugin) even independent of the hardware-availability limitation `tasks.md` already and correctly deferred to `/verify`. The three specifically-flagged review areas (D2 child-process spawning, the independent NDJSON protocol implementation, and restart/backoff soundness) are all sound and need no changes. QA-007 and QA-008 are Minor and do not block progress on their own; the architect may bundle their fixes with QA-006's or schedule them separately. Once QA-006 is fixed, this change should return to static review only for that fix (a narrow, easily re-verified change) before proceeding to `/verify` with real or emulated hardware.
+
+---
+---
+
+# Re-verification Session — 2026-07-14 — `stream-deck-plugin-skeleton` (QA-006/007/008)
+
+**Reviewer:** QA Engineer
+**Scope:** Re-review of commit `1af83c5` ("stream-deck-plugin-skeleton: fix QA-006/007/008") against the three findings from the prior static review session, `design.md`, and the three capability specs. Diff reviewed: `git show 1af83c5`. Full test suite and typecheck re-run on the current working tree (branch `stream-deck-plugin-skeleton`, HEAD `1af83c5`), plus a genuinely clean-room rebuild for QA-006.
+**Prepared for:** Technical Architect
+
+## Summary
+
+All three previously-open findings (QA-006 Major, QA-007 Minor, QA-008 Minor) are confirmed resolved by direct inspection, a from-scratch build, and — for QA-008 — a mutation test proving the new regression test actually catches the regression it claims to guard against. The full suite (52 + 30 = 82 tests, up from 79) passes and both packages type-check clean. No new issues were found. This change is ready to proceed to `/verify` with real or emulated Stream Deck hardware.
+
+## Per-finding re-verification
+
+**QA-006 (Major) — Resolved.** I did not trust the commit message or the pre-existing `com.gatoway.streamdeck.sdPlugin/bin/` directory in the working tree (it predated my review and could have been a stale artifact from an earlier, pre-fix build attempt). I deleted `stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/bin/`, `stream-deck-plugin/dist/`, and `gatoway-core/dist/` entirely, then ran `npm install` and `npm run build` from the repo root in a genuinely clean state. `com.gatoway.streamdeck.sdPlugin/bin/plugin.js` was regenerated by `scripts/packagePlugin.mjs` (invoked as the second step of `stream-deck-plugin`'s `build` script, after `tsc`). I read the generated file directly — it is real, current, compiled ESM JavaScript (not a stub), with import statements matching the actual source (`@elgato/streamdeck`, `./actions/idleAction.js`, `./coreLifecycle/config.js`, etc.). I then confirmed the file is actually loadable from its new location, not just present: a dynamic `import()` of the copied file resolved every one of its imports (bare specifiers `@elgato/streamdeck`/`@gatoway/core` via npm-workspace hoisting up through `com.gatoway.streamdeck.sdPlugin/bin/` → `stream-deck-plugin/` → the repo root's `node_modules`, plus all relative imports) — it only threw once it reached the Stream Deck SDK's own manifest-lookup logic, which is unrelated to this fix (an artifact of invoking via dynamic `import()` rather than as `argv[1]`). I also ran it directly as `node .../bin/plugin.js` (its real invocation form): it started without any module-resolution error and blocked waiting for a Stream Deck host connection, as expected for a plugin run outside the actual application. `manifest.json`'s `CodePath: "bin/plugin.js"` now resolves to a genuine, freshly-built, loadable file after every clean build. One transient false alarm during this verification: my very first `npm run build --workspace=stream-deck-plugin` invocation (run immediately after a fresh `npm install` following the `rm -rf`) failed with a wall of `@types/node`/module-resolution TypeScript errors; re-running the identical command immediately afterward (and a full from-scratch `rm -rf` + `npm install` + `npm run build` repeat) succeeded cleanly both times, and running `tsc` directly from inside `stream-deck-plugin/` also succeeded — this looks like a one-off npm-workspace-linking race on the very first postinstall build rather than a defect in `1af83c5`'s change, but the architect should be aware a first build in a truly fresh checkout may need a retry. Noted as an Observation below rather than a finding against this fix, since it self-resolved and is not attributable to any code this commit touched.
+
+**QA-007 (Minor) — Resolved.** `CoreClient` now records `startedAt = this.now()` in `start()` and routes both failure paths that previously logged unconditionally at `error` (`core_client_token_read_failed`, `core_client_connect_failed`) through a new `logConnectFailure` helper: within `initialGracePeriodMs` (default 5000ms) of `start()`, the failure logs at `info` with an explicit "may still be starting up" qualifier; once elapsed, it escalates to `error` exactly as before. I traced the call sites: both of the original QA-007 evidence's failure points now go through this helper, and no other log statement in the file was touched (the socket-error, disconnect, and rejected-registration paths still log at `warn` as before — unaffected and out of scope for this finding). The grace window is measured from each `start()` call, not from the constructor or from each individual retry attempt, which is the correct semantics — a client that's still failing after 5 real seconds of retries is no longer in the benign "just starting up" state, regardless of how many attempts it's made in that window. Two new unit tests exercise both branches: one asserts `info` (not `error`) is logged for a failure at `now() = 0` with `startedAt = 0`; the other, using a controllable clock and capturing the scheduled-retry callback, advances the clock past the grace period and confirms the *same* failure type now logs at `error`. I ran both tests directly and confirmed they pass, and confirmed (by reading the assertions) that they'd fail under the pre-fix behavior. No spec or `design.md` text mandates a specific log level for this path, so this is a quality/observability improvement, consistent with the original finding's framing — no conflict with any capability spec.
+
+**QA-008 (Minor) — Resolved, and independently verified via mutation testing.** `stream-deck-plugin/test/unit/idleAction.test.ts` now exists, reads `idleAction.ts`'s source directly, strips comments (so the file's own doc-comment mention of "onKeyDown" doesn't produce a false pass), sanity-checks the extraction found `class IdleAction` at all, and asserts no `onKeyDown(` method signature is present. I did not just confirm the test exists and passes — I temporarily added a real `onKeyDown` method to `idleAction.ts` and re-ran this test in isolation: it failed exactly as expected (`expect(withoutComments).not.toMatch(/\bonKeyDown\s*\(/)`), then I restored the original file (verified via `git status` showing a clean tree) and reran it to confirm it passes again. This directly proves the regression test is effective, not merely present. `tasks.md` 5.3's annotation was also corrected to reference this real test by file name and to explain, accurately, why it's a source-structural check rather than a live-instantiation test (Vitest's SSR module runner cannot execute `idleAction.ts`'s native class-decorator syntax — consistent with the pre-existing explanation already documented atop `idleKeyRenderer.ts`).
+
+## Regression check
+
+- Full clean-room rebuild: `rm -rf` on both packages' `dist/` and the `.sdPlugin/bin/` directory, `npm install`, `npm run build` from the repo root — succeeded, produced `com.gatoway.streamdeck.sdPlugin/bin/plugin.js` as described above.
+- `npm run typecheck` (both workspaces): clean, zero errors, for both `gatoway-core` and `stream-deck-plugin`.
+- `npm test` (both workspaces): **52/52 (`gatoway-core`) + 30/30 (`stream-deck-plugin`) = 82/82 passing**, up from 79 in the prior session (4 new tests added: 2 for QA-007, 1 for QA-008, plus the mutation-tested QA-008 test counted once). No failures, no skipped tests.
+- Reviewed the full diff (`git show 1af83c5`) line by line: changes are confined to `tasks.md` (text-only), `stream-deck-plugin/package.json` (one script line), the new `scripts/packagePlugin.mjs`, `coreClient.ts`, and the two new/extended test files. Nothing outside the three targeted areas was touched — the three review areas the prior session specifically verified (D2 child-process spawning, the NDJSON protocol reimplementation, restart/backoff soundness) are untouched by this commit and remain sound.
+- No new Critical/Major/Minor issues were found during this re-review.
+
+## Observations
+
+- A first `npm run build` immediately after a fresh `npm install` (following a full `rm -rf` of both packages' build outputs) once produced a wall of spurious TypeScript `@types/node`-not-found errors for `stream-deck-plugin` alone; an immediate retry of the identical command, and a repeat of the entire clean-room sequence, both succeeded without incident, and running `tsc` directly from inside `stream-deck-plugin/` also succeeded on the first try. This looks like a one-off npm-workspace-linking race rather than a defect introduced by `1af83c5` (no file this commit touches affects module resolution or workspace linking), but it's worth the architect's awareness in case a fresh contributor checkout hits it — a documented "if the first build fails, run `npm install` again and retry" note, or root-caused fix, could save future confusion. Not blocking.
+- All Observations carried forward from the prior static review session (log-line verbosity on rejected registration; the pinned `typescript@^7.0.2` pre-release) still stand, unchanged and non-blocking — neither was in scope for this fix cycle.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — All three previously-open findings (1 Major, 2 Minor) are confirmed resolved by direct code inspection, a genuine clean-room rebuild (for QA-006), and a mutation test proving the new regression test is effective (for QA-008). The full suite (82 tests) passes and both packages type-check clean. No new issues were found. This change is ready for `/verify` with real or emulated Stream Deck hardware and, following that, `doc-writer` and `/opsx:archive`.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of `stream-deck-plugin-skeleton` (branch `stream-deck-plugin-skeleton`, commit `d792109`) against real Elgato Stream Deck+ hardware and the real Stream Deck desktop application (not emulated).
+**Prepared for:** Technical Architect
+
+## Summary
+
+All core behaviors were confirmed live, on real hardware, with the user directly observing the physical device: the plugin loads under the real Stream Deck application, spawns Gatoway core as a genuine child process, connects and registers over TCP, renders its idle key correctly, survives a hard kill of the Gatoway core process with the key display unaffected, automatically restarts Gatoway core and reconnects, and produces no dynamic behavior on key press beyond the hardware's own built-in press animation. One environment/setup gotcha was discovered and resolved during the session (not a code defect). One real gap was found and, after discussion with the user, is being fixed: the plugin's manifest doesn't auto-provision a default profile, so nothing appears on the device until a user manually places the Idle action on a key — the user decided to fix this by adding a default profile.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-009 | Minor | `stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json` | Manifest has no `Profiles` entry, so the idle key never appears on the device until manually placed by the user — the `stream-deck-idle-display` spec's "renders... at plugin startup" wording assumes it appears with no manual step | Open |
+
+## Issue Detail
+
+### QA-009 · Minor · `stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json`
+
+**What:** Unlike the existing Lightroom plugin's manifest (which declares a `Profiles` array with `"DontAutoSwitchWhenInstalled": false`), Gatoway's manifest declares only an `Actions` entry with no `Profiles` section at all.
+
+**Scenario:** A user links and starts the plugin exactly as documented, expecting the idle profile described in the spec to be visible on their Stream Deck. Nothing appears until they separately discover they need to open the Stream Deck software, find the "Gatoway" category, and manually drag the "Idle" action onto a key themselves.
+
+**Evidence:** Live-verified with the user: after linking, enabling developer mode (see Observations below), and restarting the plugin, the physical device showed nothing until the Idle action was manually dragged onto a key — at which point the icon and title rendered correctly (confirmed by the user).
+
+**Impact:** The `stream-deck-idle-display` spec's requirement ("SHALL render its single static idle profile on the physical Stream Deck hardware at plugin startup") is not literally met without a manual, undocumented setup step. This is a real but low-severity gap — everything works correctly once the action is placed, and this is a one-time setup action, not a recurring problem — but it doesn't match the spec's stated behavior or the existing Lightroom plugin's more polished zero-touch precedent.
+
+**Suggested fix direction:** Discussed directly with the user, who decided: add a `Profiles` entry to `manifest.json` (matching the existing Lightroom plugin's approach for the `DeviceType`/general shape) but with `"DontAutoSwitchWhenInstalled": true` — unlike Lightroom's `false` — so installing/restarting the plugin does not forcibly switch the user's device away from whatever profile they're currently viewing. This is confirmed by the user as the desired resolution, not merely a suggestion.
+
+**Root-cause level:** Code (manifest configuration). `design.md` D5 didn't explicitly decide whether the idle profile should auto-install; this is a straightforward manifest addition consistent with the existing design intent, not a design decision that needs revisiting via `/design-architecture`.
+
+## Checks Completed
+
+- **Real plugin load under real Stream Deck software:** confirmed via `ps aux` showing a genuine Stream-Deck-spawned Node process running `com.gatoway.streamdeck.sdPlugin/bin/plugin.js`, after `streamdeck link` + `streamdeck restart`.
+- **Real child-process spawn of Gatoway core:** confirmed via `ps aux` showing `gatoway-core/dist/index.js` running as a distinct process, and via Gatoway core's own log recording `gatoway_core_started`.
+- **Real TCP registration:** Gatoway core's log shows `connection_accepted` → `connection_authenticated` → `authentication_succeeded` (`pluginType: "stream-deck"`) → `register_ack` (`status: "ok"`) for a real socket connection from the real plugin process, not a test harness.
+- **Idle key rendering:** user confirmed, looking at the physical device, that the icon and "Gatoway" title rendered correctly once the Idle action was placed on a key.
+- **Crash resilience, live:** killed the real Gatoway core child process (`kill -9`) while the user watched the physical key. User confirmed the key's display was unaffected — no flash, no blank state — consistent with `stream-deck-idle-display`'s "Idle profile remains shown while disconnected" scenario.
+- **Automatic restart and reconnect, live:** confirmed via `ps aux` (new PID) and the plugin's own log file (`com.gatoway.streamdeck.sdPlugin/logs/com.gatoway.streamdeck.0.log`), which recorded the full sequence: `gatoway_core_restarting` (reason: `signal: "SIGKILL"`) → `gatoway_core_spawned` (new PID) → `core_client_connecting` → transient `ECONNREFUSED` while the new process was still starting → retry with backoff → `core_client_connected`.
+- **No dynamic key behavior:** user pressed the physical key and, after clarifying the distinction, confirmed the only visible change was the Stream Deck hardware's own standard press-animation — no icon/title change, consistent with `stream-deck-idle-display`'s "No dynamic key behavior" scenario.
+
+## Observations
+
+- **Developer mode is required for locally-linked plugins to load at all**, and this isn't obvious from a code or manifest inspection alone — the Stream Deck application's own log recorded `"Feature only enabled in developer mode"` when a `streamdeck restart` was issued before developer mode was enabled, and the plugin process silently never started (no error surfaced anywhere in Gatoway's own logs, since the plugin process never even launched). This is standard Elgato SDK behavior (`streamdeck dev` enables it), not a Gatoway defect, but it's worth documenting in the eventual README/setup instructions so a future developer (or the user, on a fresh machine) doesn't lose time on it the way this session initially did.
+- The three carried-forward Observations from the prior static-review sessions (log-line verbosity nuance, the pinned `typescript@^7.0.2` pre-release, and the one-off clean-room build flake) still stand, unchanged and non-blocking.
+
+## Review Verdict (this session)
+
+**Recommendation:** ⚠️ **Conditional pass** — All core lifecycle, connection, resilience, and rendering behavior is confirmed working correctly on real hardware. One Minor finding (QA-009) is open, with a fix direction already agreed with the user (add a `Profiles` entry with `DontAutoSwitchWhenInstalled: true`). The main agent should route QA-009 to the `developer` subagent, then do a final confirmation pass (re-link and re-check the device) before moving to `doc-writer` and `/opsx:archive`. The developer-mode requirement should be captured in documentation, not fixed in code.
+
+---
+---
+
+# QA-009 Fix Attempt and Final Disposition — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Re-checking the developer's QA-009 fix (commit `01dfe90`: added a `Profiles` entry to `manifest.json` and a bundled `Gatoway.streamDeckProfile` with the Idle action pre-placed) live against real hardware.
+
+## Outcome: fix did not achieve auto-install; root cause investigated; user accepted current behavior
+
+After the developer's fix, restarting the plugin against real hardware produced **no visible change** — the user confirmed no new "Gatoway" profile appeared anywhere, including in the profile switcher (not just "didn't force-switch," which would have been the expected effect of `DontAutoSwitchWhenInstalled: true` — nothing registered at all).
+
+Investigated directly against two real reference points already present on this machine:
+- **Volume Controller** (a currently-installed, working third-party plugin): its manifest's `Profiles` entries include an `"AutoInstall": false` field neither our manifest nor Lightroom's includes. Inspecting its bundled `.streamDeckProfile` files showed its "(Auto)" profiles are templates the plugin switches to *programmatically* (via an in-profile "Auto Software Detection" action), not profiles that appear automatically on install — so this is not actually a working example of the behavior we wanted.
+- **Lightroom's own bundled template** (`profiles/Lightroom.streamDeckProfile`): has the same empty `Device.Model`/`Device.UUID` fields as our fix. The real, currently-active "Lrc" profile the user actually uses day-to-day was found under Stream Deck's own profile storage with a populated `Device.Model` — consistent with it having been created manually by the user within the Stream Deck software, not auto-installed from that bundled template.
+
+**Conclusion:** neither existing plugin in this codebase is a confirmed working example of zero-touch profile auto-installation. Determining the actual mechanism (there may be an `AutoInstall: true` field or a different convention entirely) would require authoritative Elgato SDK documentation not accessible in this session, rather than further guess-and-check against undocumented behavior.
+
+**Discussed directly with the user, who decided:** accept manual placement (already confirmed working correctly in the original `/verify` session — icon and title render properly once the Idle action is dragged onto a key) as the current behavior, and explicitly **defer** true auto-install to a future change rather than continue investigating now.
+
+## Follow-up Actions (routed to developer)
+
+Since the `Profiles`/bundled-`.streamDeckProfile` addition doesn't deliver its intended effect and isn't confirmed to work, it should be **reverted** rather than left in the tree as non-functional scaffolding that could mislead a future reader into thinking auto-install is implemented:
+- Revert `manifest.json`'s `Profiles` entry and remove the bundled `Gatoway.streamDeckProfile` file added in commit `01dfe90`, restoring the plain `Actions`-only manifest that was confirmed working for manual placement.
+- Correct the `stream-deck-idle-display` spec's wording (currently "SHALL render its single static idle profile... at plugin startup") to accurately describe that the idle key is shown once manually placed on a key by the user, and persists across Gatoway core disconnects/restarts thereafter — matching what was actually verified live, rather than implying zero-touch appearance.
+- Note the deferred auto-install investigation as an open item in this change's `design.md` (Risks/Open Questions) for whoever picks it up in a future change.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — All core behavior (lifecycle, connection, resilience, manual-placement rendering, no dynamic key behavior) is confirmed working correctly on real hardware. QA-009 is resolved by explicit user decision: manual placement is accepted as current behavior, and auto-install is formally deferred rather than left as a half-working attempt. This is contingent on the developer completing the revert/spec-correction follow-up above before archiving.

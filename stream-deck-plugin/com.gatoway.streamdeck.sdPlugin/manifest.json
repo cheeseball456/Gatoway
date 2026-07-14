@@ -1,0 +1,46 @@
+{
+	"Name": "Gatoway",
+	"Version": "0.1.0.0",
+	"Author": "Gatoway",
+	"Actions": [
+		{
+			"Name": "Idle",
+			"UUID": "com.gatoway.streamdeck.idle",
+			"Icon": "imgs/actions/idle/icon",
+			"Tooltip": "Gatoway's static idle key. No commands are sent yet - add it to a profile to confirm the plugin renders on this hardware.",
+			"Controllers": ["Keypad"],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/idle/key",
+					"Title": "Gatoway",
+					"ShowTitle": true,
+					"TitleAlignment": "middle"
+				}
+			]
+		}
+	],
+	"Category": "Gatoway",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"CodePath": "bin/plugin.js",
+	"Description": "Spawns and supervises Gatoway core, connects to it as an authenticated client, and renders Gatoway's static idle profile.",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 2,
+	"Software": {
+		"MinimumVersion": "6.5"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "10.15"
+		},
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "20"
+	},
+	"UUID": "com.gatoway.streamdeck"
+}

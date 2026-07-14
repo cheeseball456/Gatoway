@@ -1,0 +1,5 @@
+dist/
+coverage/
+*.tsbuildinfo
+com.gatoway.streamdeck.sdPlugin/bin/
+com.gatoway.streamdeck.sdPlugin/logs/

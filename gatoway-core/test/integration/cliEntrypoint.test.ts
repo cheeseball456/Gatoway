@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer, connect, type AddressInfo, type Socket } from "node:net";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,8 +15,18 @@ import { afterEach, describe, expect, it } from "vitest";
 // way `npm run dev` / `node dist/index.js` do, and asserts it actually starts.
 
 const packageRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-const tsxBin = join(packageRoot, "node_modules", ".bin", "tsx");
 const entryPoint = join(packageRoot, "src", "index.ts");
+
+// Resolved via module resolution rather than a hand-built `node_modules/.bin/tsx` path
+// (the same class of fix as stream-deck-plugin-skeleton's `locateCoreEntryPoint`):
+// once this repo adopted npm workspaces (stream-deck-plugin-skeleton design.md D1),
+// npm hoists shared devDependencies like `tsx` to the workspace root, so a package-local
+// `node_modules/.bin/tsx` no longer reliably exists. `require.resolve` finds `tsx`
+// wherever npm actually placed it, and running it via `process.execPath` (rather than
+// executing the `.bin` shim directly) is also portable to Windows, which has no shebang
+// support for the shim's underlying script.
+const require = createRequire(import.meta.url);
+const tsxCliPath = require.resolve("tsx/cli");
 
 async function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -86,7 +97,7 @@ describe("standalone CLI entry point (QA-005 regression)", () => {
     const tcpPort = await findFreePort();
     const wsPort = await findFreePort();
 
-    child = spawn(tsxBin, [entryPoint], {
+    child = spawn(process.execPath, [tsxCliPath, entryPoint], {
       cwd: packageRoot,
       env: {
         ...process.env,
