@@ -715,3 +715,53 @@ QA-011 (`docs/PROTOCOL.md` staleness, Minor) is untouched by this commit, as exp
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — QA-010 is confirmed resolved: the fix is correct, matches `design.md` D3/D4/D7's intent, is narrowly scoped to the two affected call sites, is backed by regression tests for both of QA's original reproduction scenarios at both the unit and real-socket-integration level, and those tests correctly assert wire-level key presence (not a check an omitted field would also satisfy). No new issues found; nothing else regressed. QA-011 (Minor, `docs/PROTOCOL.md` staleness) remains open but was never in scope for this fix and should not block progress on its own — route it to `doc-writer` before `/opsx:archive`, per the original review's recommendation. This change is ready to proceed to `/verify` for hands-on hardware confirmation.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of `focus-profile-routing` (branch `focus-profile-routing`, commit `0988a1f`) against real Elgato Stream Deck+ hardware, using a test-double application-plugin client (`gatoway-core/test/manual/testAppClient.ts`) since no real Lightroom/xDesign plugin exists yet.
+**Prepared for:** Technical Architect
+
+## Summary
+
+Every core mechanism this change introduces was confirmed live, on real hardware, with the user directly observing the physical device: generic Key/Dial actions replaced the old static Idle action correctly; the idle appearance renders by default once manually placed; a test-double app registering and reporting focus correctly drives real-time `render_update`s to the device; physical key presses and dial rotation correctly resolve to `command` messages delivered to the focused app; a live `capability_update` pushed with no physical input updates the display immediately (the change's headline feature); and both an explicit blur and a disconnect-while-focused correctly revert the device to the idle appearance with the icon properly reset (QA-010's fix, confirmed live via the actual JSON payloads in Gatoway core's log — `"icon":null` explicit on every idle-sweep entry). One new Minor, non-blocking finding surfaced: an overly long capability label overflows the physical key's title area.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-012 | Minor | `docs/PROTOCOL.md` (documentation gap) | No guidance exists on practical capability-label length; a label like "Fixture A (pushed)" (19 characters) visibly overflows the physical key's title display | Open |
+
+## Issue Detail
+
+### QA-012 · Minor · Documentation gap
+
+**What:** Capability `label`/`render_update` `label` fields are plain strings with no length guidance anywhere in `design.md`, the specs, or `docs/PROTOCOL.md`.
+
+**Scenario:** An application plugin author (Lightroom, xDesign, or beyond) declares or pushes a capability label without knowing there's a practical display limit, and it overflows/clips on the physical key.
+
+**Evidence:** Live-confirmed with the user: pushing a `capability_update` with `label: "Fixture A (pushed)"` (19 characters) via the manual test-app client correctly updated the display (functionally correct — this is not a functional defect), but the user observed the text rendered wider than the physical key and ran off-screen. Reverting to a shorter label ("Gatoway", 7 characters) via the idle sweep displayed correctly at normal width.
+
+**Impact:** Cosmetic only — the underlying mechanism (live label updates) works correctly. But without documented guidance, a future plugin author has no way to know what length is safe, and will likely discover this the same way this session did: by accident, on real hardware.
+
+**Suggested fix direction:** Not a code fix — Gatoway should not silently truncate or wrap app-supplied labels (that would hide meaningful content without the app's knowledge). The right fix is documentation: add practical label-length guidance to `docs/PROTOCOL.md`'s capability/`render_update` section (e.g. "keep labels short — the Stream Deck's physical key title area comfortably fits roughly 8-10 characters at default font size before clipping").
+
+**Root-cause level:** Documentation (interface-contract completeness), not code or design. Groups naturally with QA-011 (the other open `docs/PROTOCOL.md` gap) for `doc-writer` to address in one pass.
+
+## Checks Completed
+
+- **Generic action migration:** confirmed the Stream Deck software's action list now shows "Key" and "Dial" under the "Gatoway" category; the old "Idle" action and any previous placement of it were gone, consistent with `stream-deck-idle-display`'s REMOVED/ADDED delta.
+- **Idle appearance at baseline:** after manually placing the generic Key action at `{row:0,column:0}` and `{row:0,column:1}` and the generic Dial action at `{index:0}` (matching the test-fixture layout), both keys and the dial showed "Gatoway" with the default icon before any app connected — confirmed by the user.
+- **Live focus-driven rendering:** a test-double app client registered (`pluginType: "test-app"`, declaring the fixture's three capabilities) and reported `focus: true`; the user confirmed the two keys and dial updated to "Fixture A"/"Fixture B"/"Fixture Dial" in real time.
+- **Input forwarding, keypad:** pressing the physical "Fixture A" key produced `input_event` (`keyDown` then `keyUp`) in Gatoway core's log and a matching `command` (`capabilityId: "test-fixture.button.one"`) delivered to the test-app client, confirmed in its console output.
+- **Input forwarding, dial:** rotating the physical dial produced `input_event` (`rotate`, `delta: 1`) and a matching `command` delivered to the test-app client. (An initial attempt appeared to produce no event; traced to a test-harness artifact — a stray duplicate test-app-client process from an earlier setup attempt competing for the same input pipe, not a defect in the system under test. Cleaned up and re-verified cleanly with a single instance; result above is from the clean run.)
+- **Live capability_update while focused and bound:** pushing a `capability_update` for `test-fixture.button.one` with no physical input immediately updated the key's displayed label on real hardware, confirmed by the user watching the device — this is the change's headline new capability (`REQUIREMENTS.md` FR-001), and it works.
+- **Idle reset via explicit blur:** reporting `focus: false` reverted all three positions to "Gatoway" with the icon explicitly reset (`"icon":null` in the actual `render_update` payloads, confirmed in Gatoway core's log), and the user confirmed the display visually matched, at normal width.
+- **Idle reset via disconnect:** disconnecting the test-app client while it was the focused connection correctly cleared focus and reverted all three positions to idle, confirmed both in the log (`focus_changed` with `reason: "disconnect"`) and visually by the user.
+
+## Review Verdict (this session)
+
+**Recommendation:** ✅ **Pass** — Every mechanism this change introduces is confirmed working correctly on real hardware, including the two QA fix cycles that preceded this session (QA-006/007/008 areas untouched and still sound; QA-010's icon-reset fix specifically re-verified live via real log payloads, not just automated tests). One new Minor, non-blocking, documentation-only finding (QA-012) — groups with the already-open QA-011 for a single `doc-writer` pass covering both `docs/PROTOCOL.md` gaps (missing `capability_update` section, and now label-length guidance) before `/opsx:archive`.
