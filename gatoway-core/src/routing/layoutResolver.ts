@@ -8,16 +8,22 @@ export interface PositionRef {
 
 /**
  * Resolves what capability *id* (if any) is bound to a given controller/position for a
- * connection's currently-active layout (profile-routing capability; design.md D3, AD-6/
- * AD-8: Gatoway core owns the position -> capability mapping, not the app plugins).
+ * plugin type's currently-active layout (profile-routing capability; design.md D3,
+ * AD-6/AD-8: Gatoway core owns the position -> capability mapping, not the app plugins).
  *
- * design.md D3: this change proves the routing/resolution interface and logic using an
- * in-code test fixture (`testFixtureLayoutResolver.ts`) - not real persistence. Step 6
- * (ARCHITECTURE.md's delivery sequence) replaces the fixture with a config-file-backed
- * implementation behind this same interface, so nothing that depends on `LayoutResolver`
- * needs to change when that happens.
+ * `focus-profile-routing` deliberately proved the routing/resolution interface and logic
+ * using an in-code test fixture (`testFixtureLayoutResolver.ts`, since removed) - not
+ * real persistence. `persisted-layout-config` replaces it with a config-file-backed
+ * implementation (`configLayoutResolver.ts`) behind this same interface.
  *
- * **Amended (design.md D3):** `resolve()` originally returned a full `Capability`
+ * **Amended (persisted-layout-config design.md D1):** `resolve()` now takes the
+ * requesting connection's *plugin type* (e.g. `"lightroom"`, `"xdesign"`), not its
+ * connection id. A connection id is regenerated every time a plugin reconnects, so it
+ * was never a valid key for anything persisted; plugin type is the stable identity
+ * `register` already declares, and is what real, file-backed bindings are keyed by
+ * (design.md D2).
+ *
+ * **Amended (design.md D3, prior):** `resolve()` originally returned a full `Capability`
  * object baked into the layout fixture itself, which meant a `capability_update` (D7)
  * could never actually change what renders - the fixture's embedded copy was static and
  * disconnected from anything an app actually registered or later updated. `resolve()`
@@ -28,12 +34,15 @@ export interface PositionRef {
  * `routing/capabilityLookup.ts`).
  */
 export interface LayoutResolver {
-  /** The capability id bound at `controller`/`position` for `connectionId`, or `null` if unbound. */
-  resolve(connectionId: string, controller: Controller, position: Position): string | null;
+  /** The capability id bound at `controller`/`position` for `pluginType`, or `null` if unbound. */
+  resolve(pluginType: string, controller: Controller, position: Position): string | null;
   /**
-   * Every controller/position pair this layout addresses. Used to paint a connection's
-   * full bound layout when it gains focus, and to sweep the built-in idle appearance
-   * across the whole layout when focus clears (tasks.md 3.4/3.5).
+   * Every controller/position pair any configured profile addresses (design.md D3: the
+   * union across *all* profiles, not just one). Used to paint a connection's full bound
+   * layout when it gains focus, and to sweep the built-in idle appearance across the
+   * whole layout when focus clears (tasks.md 3.4/3.5) - the idle sweep must reset every
+   * position any profile might have left showing something, not just whichever
+   * profile's connection was last focused.
    */
   allPositions(): PositionRef[];
 }
