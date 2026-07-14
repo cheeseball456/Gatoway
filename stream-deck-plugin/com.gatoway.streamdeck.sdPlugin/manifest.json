@@ -7,7 +7,7 @@
 			"Name": "Idle",
 			"UUID": "com.gatoway.streamdeck.idle",
 			"Icon": "imgs/actions/idle/icon",
-			"Tooltip": "Gatoway's static idle key, shown automatically on the Gatoway profile. No commands are sent yet.",
+			"Tooltip": "Gatoway's static idle key. No commands are sent yet - add it to a profile to confirm the plugin renders on this hardware.",
 			"Controllers": ["Keypad"],
 			"UserTitleEnabled": false,
 			"States": [
@@ -18,14 +18,6 @@
 					"TitleAlignment": "middle"
 				}
 			]
-		}
-	],
-	"Profiles": [
-		{
-			"Name": "Gatoway",
-			"DeviceType": 7,
-			"Readonly": false,
-			"DontAutoSwitchWhenInstalled": true
 		}
 	],
 	"Category": "Gatoway",

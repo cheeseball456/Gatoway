@@ -100,3 +100,15 @@ workspaces; existing `gatoway-core/` package.json/scripts are unaffected.
 
 - Exact Elgato Stream Deck SDK package/version and manifest conventions are left for the
   developer to confirm against the SDK's current documentation, rather than hardcoded here.
+- **Deferred: true zero-touch profile auto-install.** A `Profiles` entry in
+  `manifest.json` plus a bundled `Gatoway.streamDeckProfile` (with
+  `DontAutoSwitchWhenInstalled: true`) was attempted to make the idle key appear on
+  install without the user manually placing the Idle action on a key. Live testing
+  against real Stream Deck+ hardware showed this had no effect at all — no profile
+  appeared, not even the "installed but not force-switched" behavior the flag implies.
+  Investigation against two other real plugins already installed on this machine
+  (Volume Controller, Lightroom) found neither is actually a confirmed working example
+  of this mechanism either. Getting this right needs authoritative Elgato SDK
+  documentation on the real auto-install contract, not accessible in this session, so
+  the attempt was reverted and manual placement is accepted as this change's behavior.
+  Revisiting true auto-install is deferred to a future change.
