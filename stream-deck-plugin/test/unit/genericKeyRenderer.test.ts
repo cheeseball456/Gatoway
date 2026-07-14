@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildKeyDownInputEvent,
   buildKeyUpInputEvent,
+  GENERIC_KEY_DEFAULT_LABEL,
   renderGenericKey,
   type GenericKeyLike,
 } from "../../src/actions/genericKeyRenderer.js";
@@ -20,13 +21,41 @@ function fakeKeyAction(isKey = true): GenericKeyLike & {
 }
 
 describe("renderGenericKey", () => {
-  it("does nothing when no render state exists yet for this position", async () => {
+  // design.md D6 / QA-014: a full plugin restart wipes RenderStore entirely, and a
+  // missing/empty layout config gives Gatoway core zero positions to sweep - without
+  // this local baseline, the action would otherwise be left showing nothing at all
+  // (previously: no-op) or, on real hardware, an uninitialized-looking manifest default.
+  it("applies the local default baseline (manifest label, default icon) when no render state exists yet for this position, with no Gatoway core message involved at all", async () => {
     const action = fakeKeyAction();
+    await renderGenericKey(action, undefined);
+
+    expect(action.setTitle).toHaveBeenCalledWith(GENERIC_KEY_DEFAULT_LABEL);
+    expect(action.setImage).toHaveBeenCalledWith(undefined);
+    expect(action.setState).not.toHaveBeenCalled();
+  });
+
+  it("does not apply the local default baseline to a non-key (dial) instance", async () => {
+    const action = fakeKeyAction(false);
     await renderGenericKey(action, undefined);
 
     expect(action.setTitle).not.toHaveBeenCalled();
     expect(action.setImage).not.toHaveBeenCalled();
-    expect(action.setState).not.toHaveBeenCalled();
+  });
+
+  it("a subsequent real render_update still overrides the local baseline normally", async () => {
+    const action = fakeKeyAction();
+
+    // First appearance: no remembered state yet - local baseline applies.
+    await renderGenericKey(action, undefined);
+    expect(action.setTitle).toHaveBeenCalledWith(GENERIC_KEY_DEFAULT_LABEL);
+
+    // A real render_update subsequently arrives for this position (simulated here by
+    // RenderStore having merged it - see renderStore.test.ts - and this function being
+    // invoked again with the resulting defined state, exactly as applyRenderUpdate does).
+    await renderGenericKey(action, { label: "Next Photo", icon: "next-photo.png" });
+
+    expect(action.setTitle).toHaveBeenLastCalledWith("Next Photo");
+    expect(action.setImage).toHaveBeenLastCalledWith("next-photo.png");
   });
 
   it("does nothing for a non-key (dial) instance even if render state exists", async () => {

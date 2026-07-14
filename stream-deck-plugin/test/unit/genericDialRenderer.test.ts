@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildDialPushInputEvent,
   buildDialRotateInputEvent,
+  GENERIC_DIAL_DEFAULT_LABEL,
   renderGenericDial,
   type GenericDialLike,
 } from "../../src/actions/genericDialRenderer.js";
@@ -18,12 +19,40 @@ function fakeDialAction(isDial = true): GenericDialLike & {
 }
 
 describe("renderGenericDial", () => {
-  it("does nothing when no render state exists yet for this position", async () => {
+  // design.md D6 / QA-014: live hardware testing found the generic Dial action stuck
+  // showing its manifest Name ("Dial") instead of its declared default Title ("Gatoway")
+  // after a full plugin restart with a missing/empty layout config - this baseline closes
+  // that gap.
+  it("applies the local default baseline (manifest label, default icon) when no render state exists yet for this position, with no Gatoway core message involved at all", async () => {
     const action = fakeDialAction();
+    await renderGenericDial(action, undefined);
+
+    expect(action.setTitle).toHaveBeenCalledWith(GENERIC_DIAL_DEFAULT_LABEL);
+    expect(action.setImage).toHaveBeenCalledWith(undefined);
+  });
+
+  it("does not apply the local default baseline to a non-dial (key) instance", async () => {
+    const action = fakeDialAction(false);
     await renderGenericDial(action, undefined);
 
     expect(action.setTitle).not.toHaveBeenCalled();
     expect(action.setImage).not.toHaveBeenCalled();
+  });
+
+  it("a subsequent real render_update still overrides the local baseline normally", async () => {
+    const action = fakeDialAction();
+
+    // First appearance: no remembered state yet - local baseline applies.
+    await renderGenericDial(action, undefined);
+    expect(action.setTitle).toHaveBeenCalledWith(GENERIC_DIAL_DEFAULT_LABEL);
+
+    // A real render_update subsequently arrives for this position (simulated here by
+    // RenderStore having merged it and this function being invoked again with the
+    // resulting defined state, exactly as applyRenderUpdate does).
+    await renderGenericDial(action, { label: "Exposure", icon: "exposure.png" });
+
+    expect(action.setTitle).toHaveBeenLastCalledWith("Exposure");
+    expect(action.setImage).toHaveBeenLastCalledWith("exposure.png");
   });
 
   it("does nothing for a non-dial (key) instance even if render state exists", async () => {

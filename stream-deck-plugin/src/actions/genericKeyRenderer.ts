@@ -20,11 +20,28 @@ export interface GenericKeyLike {
 }
 
 /**
+ * The local default baseline applied when no remembered render state exists yet for a
+ * position (design.md D6, QA-014) - must match this action's own declared default state
+ * in `manifest.json` (`Actions[].States[0].Title`), currently `"Gatoway"`.
+ */
+export const GENERIC_KEY_DEFAULT_LABEL = "Gatoway";
+
+/**
  * Applies the given render state to a key instance. Only calls setters for fields that
  * are actually defined - an undefined field means "never set" or "unchanged", not
  * "reset to nothing" (message-protocol spec's sparse-update semantics), so it must
- * never be applied as an explicit reset. Does nothing if no render state exists yet for
- * this position (nothing has been rendered - the manifest's own default state stands).
+ * never be applied as an explicit reset.
+ *
+ * When no render state exists yet for this position - nothing has ever been rendered,
+ * e.g. a fresh placement or the plugin process itself having just restarted, which wipes
+ * `RenderStore`'s in-memory state entirely (design.md D6, QA-014) - this applies a local
+ * default baseline (the manifest's own declared default label/icon) immediately,
+ * independent of anything Gatoway core sends, rather than leaving the action looking
+ * uninitialized. This is a one-time local fallback only: once a real `render_update`
+ * arrives for this position, `RenderStore.apply()` always records an entry for it (see
+ * that file), so this function is never invoked with an undefined `state` for that
+ * position again - the branch below then applies normally, exactly as if no local
+ * baseline had ever been applied.
  *
  * `icon` is handled specially (amended): `undefined` means "never touch the image" (no
  * call at all); `null` means "explicitly reset to the manifest's bundled default",
@@ -36,7 +53,12 @@ export async function renderGenericKey(
   action: GenericKeyLike,
   state: RenderState | undefined,
 ): Promise<void> {
-  if (!action.isKey() || !state) {
+  if (!action.isKey()) {
+    return;
+  }
+  if (!state) {
+    await action.setTitle(GENERIC_KEY_DEFAULT_LABEL);
+    await action.setImage(undefined);
     return;
   }
   if (state.label !== undefined) {
