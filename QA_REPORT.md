@@ -790,7 +790,7 @@ Everything else reviewed — the config schema/validation (`layoutConfig.ts`), `
 
 | ID | Severity | Location | Description | Status |
 |----|----------|----------|-------------|--------|
-| QA-013 | Minor | `gatoway-core/src/routing/layoutStore.ts:160-171` (`LayoutStore.save()`) | A failed `rename()` during `save()` leaves an orphaned `<file>.<uuid>.tmp` file behind in the config directory with no cleanup; the target config file itself is never corrupted (confirmed by fault injection), but repeated failures accumulate stray temp files indefinitely. Untested by the existing suite (which only exercises the happy path). | Open |
+| QA-013 | Minor | `gatoway-core/src/routing/layoutStore.ts:160-171` (`LayoutStore.save()`) | A failed `rename()` during `save()` leaves an orphaned `<file>.<uuid>.tmp` file behind in the config directory with no cleanup; the target config file itself is never corrupted (confirmed by fault injection), but repeated failures accumulate stray temp files indefinitely. Untested by the existing suite (which only exercises the happy path). | Resolved (commit `84d293c`) |
 
 **Status values:**
 - `Open` — not yet fixed; needs architect attention
