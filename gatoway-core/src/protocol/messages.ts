@@ -19,6 +19,19 @@ export interface Capability {
   label: string;
   type: "button" | "dial";
   description?: string;
+  /**
+   * `undefined` here means "this capability currently has no icon" - whether because
+   * none was ever declared, or because a `capability_update` explicitly reset it
+   * (`icon: null`; see `handleCapabilityUpdate`'s icon-merge). Both cases are the same
+   * stored fact and are treated identically wherever a `render_update` is built from a
+   * live `Capability`: those call sites (`sendBoundLayoutSweep`,
+   * `handleCapabilityUpdate`'s re-render) always assert an explicit `null` on the wire
+   * for an unset icon (`capability.icon ?? null`), never omit the field - because they
+   * are full, authoritative statements of a position's current display, not partial
+   * deltas (QA-010). Omitting it would collapse "no icon" into sparse-update semantics'
+   * "leave unchanged" once JSON-serialized, silently failing the icon-reset case
+   * `capability_update`/D7 exists to support.
+   */
   icon?: string;
   /** Toggle/indicator state (e.g. on/off), mirroring `render_update`'s `state`. */
   state?: number;

@@ -171,6 +171,56 @@ describe("ProfileRouter", () => {
     ]);
   });
 
+  it("QA-010 regression: sends icon:null (not omitted) when focus supersedes directly to a connection whose bound capability has no icon", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const focusTracker = new FocusTracker(logger);
+    const router = new ProfileRouter({ manager, focusTracker, layoutResolver: fakeLayoutResolver(), logger });
+
+    const streamDeckSent: unknown[] = [];
+    const streamDeck = acceptConnection(manager, streamDeckSent);
+    manager.transition(streamDeck.id, "authenticated");
+    manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, []);
+
+    // App A is focused first, its bound capability has an icon.
+    const appA = acceptConnection(manager, []);
+    manager.transition(appA.id, "authenticated");
+    manager.setPluginInfo(appA.id, "test-app-a", [{ ...CAP_ONE }]);
+    router.handleFocus(appA, { focused: true });
+    const boundIcon = (streamDeckSent[0] as { payload: { icon?: string | null } }).payload.icon;
+    expect(boundIcon).toBe("one.png");
+    streamDeckSent.length = 0;
+
+    // App B directly supersedes A's focus (design.md D2: no intervening blur/idle sweep)
+    // - its own capability bound at the same id/position has no icon.
+    const appB = acceptConnection(manager, []);
+    manager.transition(appB.id, "authenticated");
+    manager.setPluginInfo(appB.id, "test-app-b", [
+      { id: "cap.one", label: "No Icon", type: "button" },
+    ]);
+    router.handleFocus(appB, { focused: true });
+
+    expect(streamDeckSent).toEqual([
+      {
+        type: "render_update",
+        connectionId: streamDeck.id,
+        payload: { controller: "keypad", position: { row: 0, column: 0 }, icon: null, label: "No Icon" },
+      },
+      {
+        type: "render_update",
+        connectionId: streamDeck.id,
+        payload: { controller: "encoder", position: { index: 0 }, icon: null, label: "No Icon" },
+      },
+    ]);
+    // Confirm this really is an explicit `null`, not an omitted key that would collapse
+    // into "leave unchanged" (App A's stale "one.png") once JSON-serialized.
+    for (const message of streamDeckSent) {
+      const payload = (message as { payload: Record<string, unknown> }).payload;
+      expect(Object.prototype.hasOwnProperty.call(payload, "icon")).toBe(true);
+      expect(payload.icon).toBeNull();
+    }
+  });
+
   it("skips a bound position, without crashing, when the layout resolver binds a capability id the focused connection never declared", () => {
     const logger = fakeLogger();
     const manager = new ConnectionManager(logger);
@@ -371,6 +421,46 @@ describe("ProfileRouter", () => {
           payload: { controller: "encoder", position: { index: 0 }, icon: "two.png", label: "Two" },
         },
       ]);
+    });
+
+    it("QA-010 regression: immediately re-renders icon:null (not omitted) when a capability_update explicitly resets icon to null", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, layoutResolver: fakeLayoutResolver(), logger });
+
+      const streamDeckSent: unknown[] = [];
+      const streamDeck = acceptConnection(manager, streamDeckSent);
+      manager.transition(streamDeck.id, "authenticated");
+      manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, []);
+
+      const app = acceptConnection(manager, []);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", [{ ...CAP_ONE }]);
+      router.handleFocus(app, { focused: true });
+      const boundIcon = (streamDeckSent[0] as { payload: { icon?: string | null } }).payload.icon;
+      expect(boundIcon).toBe("one.png");
+      streamDeckSent.length = 0;
+
+      router.handleCapabilityUpdate(app, { capabilityId: "cap.one", icon: null });
+
+      expect(streamDeckSent).toEqual([
+        {
+          type: "render_update",
+          connectionId: streamDeck.id,
+          payload: { controller: "keypad", position: { row: 0, column: 0 }, icon: null, label: "One" },
+        },
+        {
+          type: "render_update",
+          connectionId: streamDeck.id,
+          payload: { controller: "encoder", position: { index: 0 }, icon: null, label: "One" },
+        },
+      ]);
+      for (const message of streamDeckSent) {
+        const payload = (message as { payload: Record<string, unknown> }).payload;
+        expect(Object.prototype.hasOwnProperty.call(payload, "icon")).toBe(true);
+        expect(payload.icon).toBeNull();
+      }
     });
 
     it("stores a capability_update but sends no render when the sender is not the focused connection", () => {

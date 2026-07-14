@@ -227,6 +227,49 @@ describe("focus tracking + profile routing (integration)", () => {
     expect(app.received.filter((m) => m.type === "command")).toHaveLength(0);
   });
 
+  it("QA-010 regression: sends icon:null (not omitted) on the wire when focus supersedes directly to an app whose bound capability has no icon", async () => {
+    const { port, token } = await start();
+
+    const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+    clients.push(streamDeck);
+    await streamDeck.waitForMessageType("render_update", 3); // initial idle sweep
+
+    const appA = await TestDoubleClient.connectAndRegister(port, token, "test-app-a", FIXTURE_CAPABILITIES);
+    clients.push(appA);
+    appA.send({ type: "focus", payload: { focused: true } });
+    await streamDeck.waitForMessageType("render_update", 6); // 3 idle + 3 bound
+
+    const bound = await streamDeck.waitForMessageType("render_update", 6);
+    const keypadOneFromA = bound.slice(3).find(
+      (m) => (m.payload as { position?: { row?: number; column?: number } }).position?.row === 0 &&
+        (m.payload as { position?: { row?: number; column?: number } }).position?.column === 0,
+    );
+    expect((keypadOneFromA?.payload as { icon?: string | null }).icon).toBe("fixture-a.png");
+
+    // App B directly supersedes App A's focus (design.md D2: last-report-wins, no
+    // intervening blur/idle sweep) - its own capability at the same bound id has no
+    // icon. It only declares this one capability, so the sweep skips the other two
+    // fixture positions (undeclared there) and sends just this one render_update.
+    const appB = await TestDoubleClient.connectAndRegister(port, token, "test-app-b", [
+      { id: "test-fixture.button.one", label: "No Icon", type: "button" },
+    ]);
+    clients.push(appB);
+    appB.send({ type: "focus", payload: { focused: true } });
+
+    const afterSupersede = await streamDeck.waitForMessageType("render_update", 7); // 3 idle + 3 A + 1 B
+    const keypadOneFromB = afterSupersede.slice(6).find(
+      (m) => (m.payload as { position?: { row?: number; column?: number } }).position?.row === 0 &&
+        (m.payload as { position?: { row?: number; column?: number } }).position?.column === 0,
+    );
+    expect(keypadOneFromB).toBeDefined();
+    const payload = keypadOneFromB!.payload as Record<string, unknown>;
+    // Confirms the `icon` key survived the real JSON round-trip as an explicit `null`,
+    // not an omitted key that would collapse into "leave unchanged" (App A's stale
+    // "fixture-a.png") per sparse-update semantics.
+    expect(Object.prototype.hasOwnProperty.call(payload, "icon")).toBe(true);
+    expect(payload.icon).toBeNull();
+  });
+
   it("reverts to the idle sweep when the focused application blurs", async () => {
     const { port, token } = await start();
 
@@ -295,6 +338,31 @@ describe("focus tracking + profile routing (integration)", () => {
         label: "Fixture A!",
         state: undefined,
       });
+    });
+
+    it("QA-010 regression: immediately re-renders icon:null on the wire when capability_update explicitly resets icon to null", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3); // initial idle sweep
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      clients.push(app);
+      app.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6); // 3 idle + 3 bound
+
+      app.send({
+        type: "capability_update",
+        payload: { capabilityId: "test-fixture.button.one", icon: null },
+      });
+
+      const updates = await streamDeck.waitForMessageType("render_update", 7);
+      const pushed = updates[6];
+      const payload = pushed.payload as Record<string, unknown>;
+      expect(Object.prototype.hasOwnProperty.call(payload, "icon")).toBe(true);
+      expect(payload.icon).toBeNull();
+      expect(payload.label).toBe("Fixture A");
     });
 
     it("applies a capability_update from a non-focused connection without rendering anything", async () => {

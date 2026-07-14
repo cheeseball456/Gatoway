@@ -60,3 +60,14 @@ to default. See design.md D3/D4/D7 (amended) for the full rationale.
 - [x] 7.8 If the sender is the focused connection and the updated capability is bound to a position, immediately send a `render_update` reflecting the change
 - [x] 7.9 Update the Stream Deck plugin's generic action renderers to treat `icon: null` as "reset to manifest default" (call `setImage()` with no argument) distinctly from an omitted `icon` field
 - [x] 7.10 Add/adjust unit and integration tests covering: capability updates while focused (immediate re-render), while not focused (no render), for an undeclared capability id (rejected), and the idle sweep's explicit icon reset (including after a previously-focused connection's icon was shown)
+
+**QA-010 fix (Major, post-review):** `sendBoundLayoutSweep` and `handleCapabilityUpdate`'s
+immediate re-render (`profileRouter.ts`) built `RenderUpdatePayload.icon` directly from a
+live `Capability.icon`, so an unset icon produced `icon: undefined` — dropped by JSON
+serialization and collapsed into "leave unchanged" instead of the intended "reset to
+manifest default." Both call sites now assert `capability.icon ?? null` since they are
+always full, authoritative statements of a position's current display, never partial
+deltas. Added regression tests for both of QA's reproduction scenarios (direct focus
+supersession to a capability with no icon; `capability_update: { icon: null }` while
+focused/bound) at both the unit level (`profileRouter.test.ts`) and the real-socket
+integration level (`focusProfileRouting.integration.test.ts`).

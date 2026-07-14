@@ -222,7 +222,12 @@ export class ProfileRouter implements ProtocolRouter {
       this.sendRenderUpdate(streamDeckConnection, {
         controller,
         position,
-        icon: capability.icon,
+        // QA-010 fix: same reasoning as sendBoundLayoutSweep above - this re-render is a
+        // full, authoritative statement of the capability's current display, so an
+        // explicit icon:null reset (including one requested via capability_update, which
+        // stores it as `undefined` - see the icon-merge above) must survive as `null` on
+        // the wire, not collapse into "omitted" (= "leave unchanged").
+        icon: capability.icon ?? null,
         label: capability.label,
         state: capability.state,
       });
@@ -280,7 +285,13 @@ export class ProfileRouter implements ProtocolRouter {
       const payload: RenderUpdatePayload = {
         controller,
         position,
-        icon: capability.icon,
+        // QA-010 fix: this sweep is always a full, authoritative statement of "what does
+        // this position look like right now" for the newly-focused connection - never a
+        // partial delta - so an unset `capability.icon` must be asserted as an explicit
+        // `null` (reset to manifest default), not omitted. Omitting it here would be
+        // indistinguishable, once JSON-serialized, from "leave unchanged", which would
+        // leave a previously-focused connection's icon visually stuck.
+        icon: capability.icon ?? null,
         label: capability.label,
         state: capability.state,
       };
