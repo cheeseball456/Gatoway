@@ -1,9 +1,18 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Logger } from "../../src/logging/logger.js";
 import { LayoutStore } from "../../src/routing/layoutStore.js";
+
+// Partial mock: `rename`/`unlink` default to the real implementation, but individual
+// QA-013 regression tests below override them per-call to simulate a failed rename (and,
+// in one case, a failed cleanup) without disturbing every other test in this file, which
+// all rely on the real filesystem.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename), unlink: vi.fn(actual.unlink) };
+});
 
 function fakeLogger(): Logger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
@@ -18,6 +27,8 @@ describe("LayoutStore", () => {
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
+    vi.mocked(rename).mockClear();
+    vi.mocked(unlink).mockClear();
   });
 
   function filePath(): string {
@@ -256,6 +267,51 @@ describe("LayoutStore", () => {
         { controller: "keypad", position: { row: 0, column: 0 }, capabilityId: "next-photo" },
         { controller: "keypad", position: { row: 1, column: 1 }, capabilityId: "prev-photo" },
       ]);
+    });
+
+    // QA-013 regression: a failed rename() must not leak the temp file, and must not
+    // corrupt (or even touch) the previously-saved target file.
+    it("cleans up the temp file and propagates the original error if rename() fails (QA-013)", async () => {
+      const logger = fakeLogger();
+      const store = new LayoutStore({ filePath: filePath(), logger });
+      await store.load();
+      store.setBinding("lightroom", "keypad", { row: 0, column: 0 }, "next-photo");
+      await store.save();
+
+      store.setBinding("lightroom", "keypad", { row: 1, column: 1 }, "prev-photo");
+      const renameError = new Error("simulated rename failure");
+      vi.mocked(rename).mockRejectedValueOnce(renameError);
+
+      await expect(store.save()).rejects.toThrow("simulated rename failure");
+
+      const { readdir } = await import("node:fs/promises");
+      const files = await readdir(dir);
+      expect(files).toEqual(["layout.json"]); // no orphaned .tmp file left behind
+
+      const contents = await readFile(filePath(), "utf8");
+      expect(JSON.parse(contents)).toEqual({
+        profiles: { lightroom: { bindings: [{ controller: "keypad", position: { row: 0, column: 0 }, capabilityId: "next-photo" }] } },
+      }); // target file still reflects the last successful save, untouched by the failed one
+      expect(logger.warn).not.toHaveBeenCalled(); // cleanup itself succeeded, no secondary warning
+    });
+
+    it("logs a secondary warning (without masking the original error) if the temp-file cleanup itself fails", async () => {
+      const logger = fakeLogger();
+      const store = new LayoutStore({ filePath: filePath(), logger });
+      await store.load();
+      store.setBinding("lightroom", "keypad", { row: 0, column: 0 }, "next-photo");
+
+      const renameError = new Error("simulated rename failure");
+      vi.mocked(rename).mockRejectedValueOnce(renameError);
+      const cleanupError = new Error("simulated unlink failure");
+      vi.mocked(unlink).mockRejectedValueOnce(cleanupError);
+
+      await expect(store.save()).rejects.toThrow("simulated rename failure");
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "layout_config_temp_cleanup_failed", error: "simulated unlink failure" }),
+        expect.any(String),
+      );
     });
   });
 });

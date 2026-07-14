@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Logger } from "../logging/logger.js";
 import type { Controller, Position } from "../protocol/messages.js";
@@ -156,6 +156,13 @@ export class LayoutStore {
    * Persists the current in-memory layout back to the config file, atomically
    * (design.md D5): writes to a temp file in the same directory, then renames it over
    * the target, so a crash mid-write can never leave a corrupted config file.
+   *
+   * If the `rename()` step fails (e.g. a cross-device rename, a permissions error, or a
+   * concurrent lock on the target), the target file is never touched - but the temp file
+   * would otherwise be leaked forever (QA-013). On that failure path we best-effort
+   * `unlink()` the temp file before re-throwing the original error; a failure to clean up
+   * is logged as a secondary warning but never masks (or replaces) the original error the
+   * caller needs to see.
    */
   async save(): Promise<void> {
     const config: LayoutConfigFile = { profiles: {} };
@@ -167,6 +174,22 @@ export class LayoutStore {
     await mkdir(dir, { recursive: true });
     const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
     await writeFile(tempPath, JSON.stringify(config, null, 2), "utf8");
-    await rename(tempPath, this.filePath);
+    try {
+      await rename(tempPath, this.filePath);
+    } catch (err) {
+      try {
+        await unlink(tempPath);
+      } catch (cleanupErr) {
+        this.logger.warn(
+          {
+            event: "layout_config_temp_cleanup_failed",
+            path: tempPath,
+            error: (cleanupErr as Error).message,
+          },
+          "failed to clean up the temp file left behind by a failed layout config save; it may need manual removal",
+        );
+      }
+      throw err;
+    }
   }
 }

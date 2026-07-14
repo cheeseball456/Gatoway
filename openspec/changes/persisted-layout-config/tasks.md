@@ -24,6 +24,7 @@
 ## 4. Testing
 
 - [x] 4.1 Unit tests for `LayoutStore`: load valid config, missing file, invalid JSON, wrong shape, setBinding/removeBinding, save-then-reload round-trip, atomic-write behavior
+  - [x] QA-013 fix: `save()` now cleans up the orphaned `.tmp` file (and logs a secondary warning without masking the original error, if cleanup itself fails) when `rename()` fails; regression tests added covering both the successful-cleanup and failed-cleanup paths
 - [x] 4.2 Unit tests for the config-backed `LayoutResolver`: resolve by plugin type (not connection id), two connections of the same plugin type resolve identically, `allPositions()` unions across profiles
 - [x] 4.3 Update/replace `focus-profile-routing`'s existing tests that depended on `testFixtureLayoutResolver.ts` to use a real (test-authored) config file instead
 - [~] 4.4 Manually verify: hand-author a layout config file binding a made-up capability id to a real physical position, confirm resolution/rendering works end to end using the existing manual test-app client, and confirm the missing/malformed-file fallback behavior with real Gatoway core startup logs
