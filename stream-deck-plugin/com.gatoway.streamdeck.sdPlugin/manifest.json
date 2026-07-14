@@ -4,18 +4,32 @@
 	"Author": "Gatoway",
 	"Actions": [
 		{
-			"Name": "Idle",
-			"UUID": "com.gatoway.streamdeck.idle",
-			"Icon": "imgs/actions/idle/icon",
-			"Tooltip": "Gatoway's static idle key. No commands are sent yet - add it to a profile to confirm the plugin renders on this hardware.",
+			"Name": "Key",
+			"UUID": "com.gatoway.streamdeck.key",
+			"Icon": "imgs/actions/genericKey/icon",
+			"Tooltip": "Generic Gatoway key: forwards presses to Gatoway core and displays whatever it instructs, including the idle appearance when no application currently has focus.",
 			"Controllers": ["Keypad"],
 			"UserTitleEnabled": false,
 			"States": [
 				{
-					"Image": "imgs/actions/idle/key",
+					"Image": "imgs/actions/genericKey/key",
 					"Title": "Gatoway",
 					"ShowTitle": true,
 					"TitleAlignment": "middle"
+				}
+			]
+		},
+		{
+			"Name": "Dial",
+			"UUID": "com.gatoway.streamdeck.dial",
+			"Icon": "imgs/actions/genericDial/icon",
+			"Tooltip": "Generic Gatoway dial: forwards rotation and presses to Gatoway core and displays whatever it instructs, including the idle appearance when no application currently has focus.",
+			"Controllers": ["Encoder"],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/genericDial/key",
+					"Title": "Gatoway"
 				}
 			]
 		}
@@ -23,7 +37,7 @@
 	"Category": "Gatoway",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"CodePath": "bin/plugin.js",
-	"Description": "Spawns and supervises Gatoway core, connects to it as an authenticated client, and renders Gatoway's static idle profile.",
+	"Description": "Spawns and supervises Gatoway core, connects to it as an authenticated client, and renders generic Key/Dial actions whose display and behavior Gatoway core controls, including the idle appearance when nothing is focused.",
 	"Icon": "imgs/plugin/marketplace",
 	"SDKVersion": 2,
 	"Software": {

@@ -7,22 +7,45 @@ import { generateToken, writeTokenFile } from "./auth/token.js";
 import { ConnectionManager } from "./connection/connectionManager.js";
 import { startTcpListener, type TcpListenerHandle } from "./connection/tcpListener.js";
 import { startWsListener, type WsListenerHandle } from "./connection/wsListener.js";
+import { FocusTracker } from "./focus/focusTracker.js";
+import { createTestFixtureLayoutResolver } from "./routing/testFixtureLayoutResolver.js";
+import { ProfileRouter } from "./routing/profileRouter.js";
 
 export type { GatowayCoreConfig } from "./config.js";
 export { ConnectionManager } from "./connection/connectionManager.js";
 export type { ConnectionRecord, ConnectionState, Transport } from "./connection/types.js";
+export type { ProtocolRouter } from "./connection/protocolRouter.js";
 export type { GatowayMessage } from "./protocol/envelope.js";
 export type {
   Capability,
+  CapabilityUpdatePayload,
+  CommandPayload,
+  Controller,
+  EncoderPosition,
   ErrorPayload,
+  FocusPayload,
+  InputEventPayload,
+  InputEventType,
+  KeypadPosition,
+  Position,
   RegisterAckPayload,
   RegisterPayload,
+  RenderUpdatePayload,
 } from "./protocol/messages.js";
+export { FocusTracker } from "./focus/focusTracker.js";
+export type { FocusChangeEvent, FocusChangeReason } from "./focus/focusTracker.js";
+export type { LayoutResolver, PositionRef } from "./routing/layoutResolver.js";
+export { createTestFixtureLayoutResolver } from "./routing/testFixtureLayoutResolver.js";
+export { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "./routing/profileRouter.js";
 
 export interface GatowayCoreHandle {
   readonly config: GatowayCoreConfig;
   readonly manager: ConnectionManager;
   readonly logger: Logger;
+  /** Tracks which connection (if any) currently has focus (focus-tracking capability). */
+  readonly focusTracker: FocusTracker;
+  /** Resolves input_events and drives render_updates (profile-routing capability). */
+  readonly profileRouter: ProfileRouter;
   /** The loopback addresses/ports actually bound by the TCP and WebSocket listeners. */
   readonly tcpAddresses: { address: string; port: number }[];
   readonly wsAddresses: { address: string; port: number }[];
@@ -75,11 +98,21 @@ export async function startGatowayCore(
 
   const manager = new ConnectionManager(logger);
 
+  // focus-tracking / profile-routing (design.md D2-D4): the test-fixture layout is
+  // deliberately temporary - see testFixtureLayoutResolver.ts's own doc comment. Step 6
+  // (ARCHITECTURE.md's delivery sequence) swaps it for a config-file-backed resolver
+  // behind the same LayoutResolver interface.
+  const focusTracker = new FocusTracker(logger);
+  const layoutResolver = createTestFixtureLayoutResolver();
+  const profileRouter = new ProfileRouter({ manager, focusTracker, layoutResolver, logger });
+  manager.onDisconnect((record) => profileRouter.handleDisconnect(record.id));
+
   const tcpHandle: TcpListenerHandle = await startTcpListener({
     port: config.tcpPort,
     manager,
     logger,
     currentToken: token,
+    router: profileRouter,
   });
 
   const wsHandle: WsListenerHandle = await startWsListener({
@@ -87,6 +120,7 @@ export async function startGatowayCore(
     manager,
     logger,
     allowedOrigins: config.allowedOrigins,
+    router: profileRouter,
   });
 
   logger.info(
@@ -98,6 +132,8 @@ export async function startGatowayCore(
     config,
     manager,
     logger,
+    focusTracker,
+    profileRouter,
     tcpAddresses: tcpHandle.addresses,
     wsAddresses: wsHandle.addresses,
     close: async () => {

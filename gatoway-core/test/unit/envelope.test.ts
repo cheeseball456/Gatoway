@@ -40,4 +40,38 @@ describe("envelope", () => {
       decodeMessage(JSON.stringify({ type: "register", payload: "nope" })),
     ).toThrow(MessageParseError);
   });
+
+  // tasks.md 1.4: the envelope is generic over `type` (it never enumerates known
+  // message types), so `focus`/`input_event`/`render_update` round-trip through
+  // encode/decode exactly like `register`/`register_ack`/`error` always have - no
+  // change to envelope.ts itself was needed for this change.
+  it("round-trips a focus message", () => {
+    const message = { type: "focus", connectionId: "conn-1", payload: { focused: true } };
+    expect(decodeMessage(encodeMessage(message))).toEqual(message);
+  });
+
+  it("round-trips an input_event message (keypad, no delta)", () => {
+    const message = {
+      type: "input_event",
+      payload: { controller: "keypad", position: { row: 0, column: 1 }, eventType: "keyDown" },
+    };
+    expect(decodeMessage(encodeMessage(message))).toEqual(message);
+  });
+
+  it("round-trips an input_event message (encoder, with delta)", () => {
+    const message = {
+      type: "input_event",
+      payload: { controller: "encoder", position: { index: 2 }, eventType: "rotate", delta: -3 },
+    };
+    expect(decodeMessage(encodeMessage(message))).toEqual(message);
+  });
+
+  it("round-trips a render_update message with sparse fields", () => {
+    const message = {
+      type: "render_update",
+      connectionId: "sd-conn",
+      payload: { controller: "keypad", position: { row: 0, column: 0 }, label: "Gatoway" },
+    };
+    expect(decodeMessage(encodeMessage(message))).toEqual(message);
+  });
 });

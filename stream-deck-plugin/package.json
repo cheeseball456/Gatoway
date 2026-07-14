@@ -2,7 +2,7 @@
   "name": "@gatoway/stream-deck-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "The Stream Deck plugin that spawns and supervises Gatoway core, connects to it as an authenticated client, and renders the static idle profile on physical Stream Deck hardware.",
+  "description": "The Stream Deck plugin that spawns and supervises Gatoway core, connects to it as an authenticated client, and renders Gatoway core's generic, position-based Key/Dial actions on physical Stream Deck hardware, including the idle appearance when nothing is focused.",
   "type": "module",
   "main": "dist/plugin.js",
   "engines": {

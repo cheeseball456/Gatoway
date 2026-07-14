@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "manual:tcp-client": "tsx test/manual/tcpTestClient.ts",
-    "manual:ws-client": "tsx test/manual/wsTestClient.ts"
+    "manual:ws-client": "tsx test/manual/wsTestClient.ts",
+    "manual:test-app-client": "tsx test/manual/testAppClient.ts"
   },
   "dependencies": {
     "pino": "^10.3.1",

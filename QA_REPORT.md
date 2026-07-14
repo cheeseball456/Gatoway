@@ -527,3 +527,241 @@ Since the `Profiles`/bundled-`.streamDeckProfile` addition doesn't deliver its i
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — All core behavior (lifecycle, connection, resilience, manual-placement rendering, no dynamic key behavior) is confirmed working correctly on real hardware. QA-009 is resolved by explicit user decision: manual placement is accepted as current behavior, and auto-install is formally deferred rather than left as a half-working attempt. This is contingent on the developer completing the revert/spec-correction follow-up above before archiving.
+
+---
+---
+
+# Static Review Session — 2026-07-14 — `focus-profile-routing`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `focus-profile-routing` (branch `focus-profile-routing`, HEAD `ddcd3ca`) — Gatoway core's new `focus-tracking`/`profile-routing` capabilities (`focusTracker.ts`, `profileRouter.ts`, `layoutResolver.ts`/`testFixtureLayoutResolver.ts`, `capabilityLookup.ts`), the five new/amended `message-protocol` message types (`focus`, `input_event`, `render_update`, `command`, `capability_update`), and the Stream Deck plugin's replacement of the static Idle action with the generic Key/Dial action model (AD-8). Reviewed against `proposal.md`, `design.md` (including its D1/D3/D4 amendments), the four capability delta specs (`focus-tracking`, `profile-routing`, `message-protocol`, `stream-deck-idle-display`), `tasks.md`, `REQUIREMENTS.md`, and `ARCHITECTURE.md` v1.4 (AD-6/AD-7/AD-8). Full test suite (100 gatoway-core + 61 stream-deck-plugin = 161 tests) and both packages' typecheck were re-run and pass. I also wrote and ran a temporary, throwaway verification test (not committed, removed before finishing this session) directly against `ProfileRouter` to confirm two suspected defects with a real, JSON-round-tripped wire payload rather than relying on static reasoning alone.
+**Prepared for:** Technical Architect
+
+## Summary
+
+D2's focus supersession (single-winner, last-report-wins) is implemented cleanly with no lingering state, `LayoutResolver`'s revised id-based contract is threaded correctly through both the bound-layout sweep and — going beyond what task 7.5 literally asked for — `input_event` resolution, and `capability_update` correctly restricts an app to updating only its own declared capabilities and correctly gates re-rendering on focus. However, the specific area this review was asked to scrutinize most carefully — the null-vs-omitted `icon` semantics that D4/D7 were amended specifically to fix — has a real, confirmed gap on the Gatoway-core side: **`Capability.icon` (the live, stored representation of a capability's display data) has no way to represent "explicitly no icon,"** so every `render_update` that Gatoway core derives from a live `Capability` (both the bound-layout sweep sent on focus gain and the immediate re-render triggered by `capability_update`) silently drops the `icon` field whenever the capability's icon is unset — which is indistinguishable, once JSON-serialized, from "field omitted," meaning "leave unchanged" rather than the intended "reset to default." I confirmed this with a real, running `ProfileRouter` in two concrete scenarios: (1) focus superseding directly from an app with an icon to an app without one leaves the first app's icon visually stuck under the second app's capability, and (2) an app explicitly sending `capability_update` with `icon: null` — the exact feature this change's task-group-7 addendum exists to deliver — silently fails to reset the display at all. Only the hardcoded idle sweep (which never goes through a `Capability` object) actually achieves the reset the design intended. See QA-010 (Major).
+
+A second, lower-severity finding: `docs/PROTOCOL.md` — the protocol reference document this change is specifically meant to produce as a durable artifact for Lightroom (step 3) and xDesign (step 5) to build against — was drafted before the `capability_update` addendum and never updated afterward, despite `tasks.md` 5.2 claiming the document was "cross-checked against the actual implemented types/behavior." It's missing the `capability_update` message type entirely and shows an outdated `RenderUpdatePayload`/`Capability` shape (no `null` on `icon`, no `state` on `Capability`). See QA-011 (Minor) — this is a real drift, not an acceptable "expected/out of scope" gap, given the document's own stated purpose and `design.md` D6's explicit reliance on it for the next two delivery-sequence steps.
+
+Everything else reviewed — D2's focus tracking, the `LayoutResolver` id/`findCapability` split, `capability_update`'s own-connection-only enforcement, the five message payload shapes against `message-protocol`'s spec, and the Stream Deck plugin's generic action rendering (which correctly implements the three-state `icon` semantics on its own side, for what it's told) — is sound and well-tested.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-010 | Major | `gatoway-core/src/routing/profileRouter.ts:173-230,253-289`, `gatoway-core/src/protocol/messages.ts:17-25` | `Capability.icon`'s stored type (`string \| undefined`) cannot represent "explicitly no icon," so `render_update`s derived from a live `Capability` (bound-layout sweep, and the immediate re-render after `capability_update`) silently drop `icon` instead of sending `null`, collapsing "explicit reset" into "leave unchanged" on the wire. | Open |
+| QA-011 | Minor | `docs/PROTOCOL.md`, `openspec/changes/focus-profile-routing/tasks.md:36` | Protocol reference doc is stale relative to the `capability_update` addendum (missing the message type entirely; `RenderUpdatePayload.icon`/`Capability` shapes shown are out of date), despite `tasks.md` 5.2 claiming it was cross-checked against the implemented behavior. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+
+---
+
+## Issue Detail
+
+### QA-010 · Major · `gatoway-core/src/routing/profileRouter.ts`, `gatoway-core/src/protocol/messages.ts`
+
+**What:** `Capability.icon` (`gatoway-core/src/protocol/messages.ts:17-25`) is typed `string | undefined` — it has no way to hold `null`. But both places that build a `RenderUpdatePayload` from a live `Capability` derive `icon` directly from this field:
+
+```ts
+// sendBoundLayoutSweep (profileRouter.ts:280-286)
+const payload: RenderUpdatePayload = {
+  controller, position,
+  icon: capability.icon,   // undefined when the capability has no icon
+  label: capability.label,
+  state: capability.state,
+};
+```
+```ts
+// handleCapabilityUpdate's immediate re-render (profileRouter.ts:222-228)
+this.sendRenderUpdate(streamDeckConnection, {
+  controller, position,
+  icon: capability.icon,   // also undefined after an icon:null reset (see below)
+  label: capability.label,
+  state: capability.state,
+});
+```
+
+`handleCapabilityUpdate`'s own icon-merge logic (`profileRouter.ts:189-193`) explicitly converts an incoming `capability_update`'s `icon: null` into `capability.icon = undefined` for storage — a deliberate, well-reasoned choice given `Capability.icon`'s type — but this means the "this was an explicit reset" signal is lost the moment it's stored, and the very next line of code that re-renders it has no way to recover that signal. Since `sendMessage`'s outgoing envelope is serialized with `JSON.stringify` (`gatoway-core/src/protocol/envelope.ts:26-28`), a `RenderUpdatePayload` with `icon: undefined` has its `icon` key dropped from the JSON entirely — which, per the `message-protocol` spec and `RenderUpdatePayload`'s own doc comment, means "leave unchanged," not "reset to default." Only the hardcoded idle sweep (`sendIdleSweep`, `profileRouter.ts:291-306`) — which never touches a `Capability` object at all, just writes the literal `icon: null` — actually achieves the reset the D4/D7 amendments were written to deliver.
+
+**Scenario:** Two realistic, in-scope situations, both directly exercising the multi-app focus arbitration this change exists to prove (FR-002, `ARCHITECTURE.md` Journey 1):
+1. Application A (whose bound capability has an icon) is focused; the user switches directly to Application B (whose capability bound to the same position has no icon of its own, e.g. it relies on the manifest's default rendering). Per D2, this is a direct supersession with no intervening idle sweep — that's the whole point of "last-report-wins, no explicit handshake required." B's bound-layout sweep is the *only* opportunity to correct the display for B.
+2. A focused application explicitly pushes `capability_update: { capabilityId: "...", icon: null }`, intending to reset its own capability's icon back to the manifest default — the very feature `tasks.md` 7.1-7.10 (task-group-7 addendum) was written to add, and the profile-routing spec's own "Capability Updates Trigger an Immediate Re-Render" requirement says this should "reflect the change."
+
+**Evidence:** I wrote a temporary test file (`gatoway-core/test/unit/tmpQaVerify.test.ts`, not committed, deleted after this session) exercising `ProfileRouter` directly with a real `ConnectionManager` and inspecting the actual JSON-round-tripped wire form of the outgoing message (`JSON.parse(JSON.stringify(sentMessage))`):
+
+- Scenario 1 (App A with icon "one.png" focused, then App B — no icon — supersedes it, same bound position): the wire form of B's `render_update` was
+  `{"type":"render_update","connectionId":"...","payload":{"controller":"keypad","position":{"row":0,"column":0},"label":"Two"}}`
+  — no `icon` key at all. Per the protocol's own sparse-update semantics, this instructs the Stream Deck plugin to leave the previously-displayed icon (App A's "one.png") exactly as it is. The Stream Deck plugin's own `RenderStore.apply()` (`stream-deck-plugin/src/actions/renderStore.ts:52-58`) confirms this reading: `icon: payload.icon === undefined ? existing?.state.icon : payload.icon` — an omitted `icon` key deserializes to `undefined`, so the store explicitly carries the old icon forward.
+- Scenario 2 (an app focused with capability icon "one.png", then sends `capability_update: { capabilityId: ..., icon: null }`): the wire form of the resulting re-render was
+  `{"type":"render_update","connectionId":"...","payload":{"controller":"keypad","position":{"row":0,"column":0},"label":"One"}}`
+  — again, no `icon` key. The app's explicit reset request is silently dropped; the Stream Deck continues showing "one.png".
+- No existing test in either package's suite exercises either scenario: `gatoway-core/test/unit/profileRouter.test.ts` and the `focusProfileRouting.integration.test.ts` integration suite's `capability_update` tests only ever change a capability's icon from one non-null string to another (`"one.png"` → `"two.png"`), and every focus-transition test in both suites only ever exercises a single app's focus/blur cycle (never a direct app-to-app supersession) — so this gap was invisible to the automated suite despite 161 passing tests.
+
+**Impact:** This directly undercuts the headline deliverable of this change's own task-group-7 addendum (`REQUIREMENTS.md` FR-001's live capability display updates) for the specific "reset to default" case, and produces a real, user-visible cross-application rendering bug in the change's primary intended use case (switching focus directly between two real application plugins, per `ARCHITECTURE.md`'s Journey 1) whenever the newly-focused capability doesn't carry its own icon. Given the in-code test fixture itself declares one capability with no icon (`test-fixture.dial.one`), this is not a contrived edge case — it would very plausibly surface during the deferred manual hardware verification (tasks.md 6.5) the moment two different test-double or real app connections are focused back-to-back at the same fixture position, or the moment a real Lightroom/xDesign capability author chooses not to set an icon on some button.
+
+**Suggested fix direction:** The outcome needed is that any `render_update` Gatoway core derives from a live `Capability` (both the bound-layout sweep and the `capability_update`-triggered re-render) faithfully carries the three-state icon signal all the way through — not just the hardcoded idle sweep. That likely means extending `Capability`'s own internal representation of "icon" to distinguish "explicitly no icon" from "not yet touched" (mirroring what `RenderUpdatePayload`/`CapabilityUpdatePayload` already do at the wire level), and having both `sendBoundLayoutSweep` and `handleCapabilityUpdate`'s re-render map an unset icon to the wire's explicit `null` rather than `undefined`, since both of these code paths are always full, authoritative statements of "what does this position look like right now" rather than true incremental deltas. Not prescribing the exact representation — the architect/developer may find a cleaner internal type than adding `null` to `Capability.icon` itself.
+
+**Root-cause level:** Code. `design.md` D3/D4/D7's stated intent — that `null` and omitted must never be collapsed, and that live capability data (including resets) must actually reach rendering — is correct and was clearly reasoned through for the idle-sweep case; the two other rendering paths this same amendment touched simply don't preserve that distinction when the data flows through `Capability` rather than a hardcoded literal. No spec or architecture change is needed to fix this.
+
+---
+
+### QA-011 · Minor · `docs/PROTOCOL.md`, `openspec/changes/focus-profile-routing/tasks.md:36`
+
+**What:** `docs/PROTOCOL.md` was drafted in commit `2807099` (tasks 5.1/5.2, before the task-group-7 addendum existed) and was never touched again — I confirmed this with `git log --follow -- docs/PROTOCOL.md`, which shows only that one commit, and `git show --stat ddcd3ca` (the task-group-7 addendum commit), which touches no files under `docs/`. As a result the document:
+- Has no `capability_update` section at all — an entire message type this change adds is undocumented.
+- Shows `RenderUpdatePayload.icon` as `icon?: string;` (`docs/PROTOCOL.md:234`), omitting the `| null` variant and the "explicit reset to manifest default" semantics that are exactly this document's job to explain to a future plugin author.
+- Shows the `Capability` interface (`docs/PROTOCOL.md:86-93`) without the `state?: number` field that exists in `gatoway-core/src/protocol/messages.ts`.
+
+`tasks.md` 5.2 states: "Cross-checked against the actual implemented types/behavior before finalizing... cross-checked against `gatoway-core/src/protocol/messages.ts`, `focusTracker.ts`, and `profileRouter.ts`" — this claim was accurate at the time it was written, but the addendum (task-group-7) landed afterward and no corresponding re-check task was added, so the claim no longer holds against the code as it stands at `ddcd3ca`.
+
+**Scenario:** A future reader — most immediately, whoever implements step 3 (Lightroom) or step 5 (xDesign) per `design.md` D6's explicit intent that this document is "the artifact step 3 and step 5 build against directly" — reads `docs/PROTOCOL.md` expecting it to be complete and current (its own header says "this document should be the only thing you need to read"), and either doesn't know `capability_update` exists at all, or implements icon handling against the documented (incomplete) `string`-only type.
+
+**Evidence:** `git log --follow --oneline -- docs/PROTOCOL.md` returns only `2807099`; `git show --stat ddcd3ca` (the commit that added `capability_update` and the `icon: string | null | undefined` change) touches only `gatoway-core/src/...`, `stream-deck-plugin/src/...`, and test files — no `docs/` path. Direct reading of `docs/PROTOCOL.md` lines 83-93 and 230-238 confirms the stale shapes described above.
+
+**Impact:** Low severity on its own (this is documentation, not shipped behavior), but it is a real, concrete drift in an artifact this change's own `proposal.md`/`design.md` treat as a first-class deliverable specifically to de-risk the next two delivery-sequence steps — the exact opposite of "expected/out of scope." This is the same category of gap as `stream-deck-plugin-skeleton`'s QA-008 (an inaccurate self-reported task-completion claim masking a real, if narrow, gap).
+
+**Suggested fix direction:** Per this project's own workflow, this is a documentation completeness gap to route to the `doc-writer` role (not a code fix) — bring `docs/PROTOCOL.md` current with `capability_update` and the corrected `icon`/`Capability` shapes before this change is archived, alongside `doc-writer`'s other planned handoff work for this change (e.g. the Migration Plan's note about `stream-deck-plugin/README.md`).
+
+**Root-cause level:** Code/process — an outdated task-tracking claim in `tasks.md` and a documentation artifact that fell out of sync with a later addendum to the same change, not a functional defect in shipped behavior.
+
+---
+
+## Areas Specifically Verified (per review scope)
+
+- **D2 focus supersession, no lingering state:** Confirmed clean. `FocusTracker.setFocused()` (`focusTracker.ts:69-85`) unconditionally overwrites `this.focusedConnectionId` with no leftover reference to the previous holder anywhere else in the class or its callers; `ProfileRouter` always re-fetches the focused connection fresh via `manager.get()` rather than caching a reference. `focusTracker.test.ts` directly exercises supersession-without-blur, no-op re-focus, blur-only-from-the-holder, and disconnect-clears-focus. No bug found.
+- **`LayoutResolver`'s id-based contract, threaded through both sweep and input resolution:** Confirmed correct, and confirmed that extending unresolved-id handling to `input_event` resolution (beyond task 7.5's literal scope, which only mentions the sweep) is itself correct and tested: `ProfileRouter.handleInputEvent` (`profileRouter.ts:117-150`) calls `layoutResolver.resolve()` for the id, then `findCapability()` against the focused connection's own declared capabilities, and safely no-ops (logged, not thrown) if either step fails — exactly mirroring `sendBoundLayoutSweep`'s equivalent handling. Both the unit test ("ignores an input_event when the focused connection has not declared the bound capability id") and the integration test ("silently ignores an input_event whose bound capability id the focused application never declared") cover this directly.
+- **`capability_update` restricted to the sender's own capabilities, and focused-vs-not-focused re-render distinction:** Confirmed correct. `handleCapabilityUpdate` (`profileRouter.ts:173-230`) looks the target capability up exclusively within `connection`'s own record via `findCapability(connection, ...)` — there is no code path that allows a `capabilityId` to be resolved against any other connection's capabilities — and correctly gates the immediate re-render on `this.focusTracker.current === connection.id`. Both unit and integration tests confirm: a background (non-focused) connection's update is stored but produces no render, and an undeclared capability id is rejected/no-op'd with a distinct log event (`capability_update_ignored`/`undeclared_capability`). No bug found here, independent of QA-010's separate icon-value issue.
+- **`message-protocol` payload shapes vs. the delta spec:** `FocusPayload`, `InputEventPayload`, `RenderUpdatePayload`, `CommandPayload`, and `CapabilityUpdatePayload` (`gatoway-core/src/protocol/messages.ts`) match the `message-protocol` spec's described shapes exactly, including the `KeypadPosition`/`EncoderPosition` discriminated addressing and `delta`'s rotate-only presence. `envelope.test.ts` round-trips `focus`/`input_event`/`render_update` through the real `encodeMessage`/`decodeMessage` pair (no round-trip test explicitly targets `command`/`capability_update`, but `decodeMessage` is fully generic over `payload` shape, as already proven by the other three — noted as an Observation, not a defect).
+- **Stream Deck plugin's own icon null/undefined handling:** Confirmed correct and thoughtfully documented on its own side. `RenderStore.apply()` and both `renderGenericKey`/`renderGenericDial` correctly distinguish `undefined` ("never touch the image") from `null` ("reset to manifest default via `setImage()` with no argument") from a `string` (set that icon) — the plugin-side implementation is exactly what QA-010's fix needs to finally be able to rely on correctly. This side of the null/undefined distinction is not implicated in QA-010; the gap is entirely upstream, in what Gatoway core actually sends.
+- **`command` message correctness:** `ProfileRouter.handleInputEvent` builds `CommandPayload` with the resolved `capabilityId` and the raw `eventType`/`delta` carried through unchanged from the originating `input_event`, matching `message-protocol`'s "Command Message Type" requirement and design.md D1's rationale (the app, not Gatoway core, decides what a gesture means). Confirmed via unit and integration tests, including the `delta: undefined` case for non-rotate events.
+- **`docs/PROTOCOL.md` staleness — judged as a real finding, not out of scope:** See QA-011 above. I did not treat this as "expected"/acceptable to defer silently, because the document's own stated purpose and `design.md` D6's explicit reliance on it for steps 3/5 make the gap consequential, and because `tasks.md` 5.2's claim of having cross-checked it is no longer accurate.
+
+---
+
+## Observations
+
+- `gatoway-core/test/unit/envelope.test.ts` round-trips `focus`/`input_event`/`render_update` explicitly but has no equivalent round-trip test for `command` or `capability_update` (both added later, in the D1/D7 amendments). `decodeMessage`/`encodeMessage` are fully generic over `payload`, so this is very unlikely to hide a real bug, but a symmetrical round-trip test for the two later-added types would close the coverage gap and match the pattern already established for the first three.
+- `ARCHITECTURE.md`'s Delivery Sequence step 4 (line 146) still says "add the `key_event`/`render_update` message types," using an older name (`key_event`) that AD-8 itself (line 67) and every other artifact in this change consistently call `input_event`. Purely cosmetic — no code or spec anywhere uses `key_event` — but worth tidying up the next time `ARCHITECTURE.md` is revised, since it's a small internal inconsistency within the same document.
+- `gatoway-core/src/routing/profileRouter.ts`'s `findStreamDeckConnection()` (`profileRouter.ts:319-323`) picks the first `authenticated` connection with `pluginType === "stream-deck"` via `.find()`; nothing in this change prevents two Stream Deck plugin connections from existing simultaneously (e.g. during a reconnect race), in which case only one would ever receive render updates. Not a realistic concern for the single-physical-device MVP this change targets, and out of scope for this review, but worth a note if multi-device support is ever considered.
+
+---
+
+## Testing Coverage Assessment
+
+Both packages' test suites are substantial and well-targeted for what they cover: `gatoway-core` adds `focusTracker.test.ts`, `profileRouter.test.ts`, `capabilityLookup.test.ts`, `testFixtureLayoutResolver.test.ts`, and a real-socket `focusProfileRouting.integration.test.ts` (test-double TCP connections against a genuinely running Gatoway core, per tasks.md 6.3); `stream-deck-plugin` adds unit tests for both generic action renderers, `renderStore.ts`, and `protocolPositions.ts`. Focus supersession, no-focus/no-binding/undeclared-capability safe-ignore paths, own-connection-only `capability_update` enforcement, and the idle-sweep icon reset are all directly and convincingly tested.
+
+The gap this review surfaced (QA-010) is precisely a testing-coverage gap as much as a code gap: no test in either suite exercises (a) a direct focus supersession between two different application connections (every focus test uses exactly one app, cycling it through focus/blur/disconnect), or (b) a `capability_update` that sets `icon: null` (every `capability_update` test changes icon between two non-null strings). Both are realistic, in-scope scenarios for this change's own stated purpose (multi-app focus arbitration and live capability display updates), and both should be added as regression tests alongside whatever fix QA-010 receives.
+
+Manual verification (tasks.md 6.5) remains correctly deferred to `/verify` per the developer's own disclosure — no physical/emulated Stream Deck hardware in this sandboxed environment. Given QA-010's evidence, I'd flag for `/verify` that testing with two distinct test-double or real app connections focused back-to-back (not just one app cycling focus/blur) is the specific scenario likely to surface this bug visually on real hardware.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ❌ **Requires fixes** — QA-010 is a Major, code-level issue that undercuts this change's own headline addition (live capability display updates, including the icon-reset case the task-group-7 addendum was written specifically to deliver) in a realistic, in-scope multi-app scenario, with no test in either suite currently guarding against it. QA-011 is Minor and should be routed to `doc-writer` rather than blocking progress on its own. Every other area this review was asked to specifically scrutinize — D2's focus-supersession cleanliness, `LayoutResolver`'s id-based contract (including its correct extension to `input_event` resolution), and `capability_update`'s own-connection-only enforcement and focused/not-focused re-render gating — is sound. Once QA-010 is fixed (with regression tests for both scenarios described above), this change should return to static review only for that fix before proceeding to `/verify` with real or test-double hardware.
+
+---
+
+# Re-verification Session — 2026-07-14 — `focus-profile-routing` (QA-010 fix)
+
+**Reviewer:** QA Engineer
+**Scope:** Re-review of the QA-010 (Major) fix on branch `focus-profile-routing`, HEAD `0a151cc` — `sendBoundLayoutSweep` and `handleCapabilityUpdate`'s immediate re-render in `gatoway-core/src/routing/profileRouter.ts`, the accompanying `Capability.icon` doc-comment in `gatoway-core/src/protocol/messages.ts`, and the new regression tests in `gatoway-core/test/unit/profileRouter.test.ts` and `gatoway-core/test/integration/focusProfileRouting.integration.test.ts`. Reviewed against the QA-010 finding above, `design.md` D3/D4/D7, `tasks.md`'s new post-review addendum, and re-run of the full test suite and typecheck for both packages.
+**Prepared for:** Technical Architect
+
+## Summary
+
+QA-010 is resolved. Both previously-affected call sites — `sendBoundLayoutSweep` (the bound-layout sweep on focus gain) and `handleCapabilityUpdate`'s immediate re-render — now assert `capability.icon ?? null` rather than passing `capability.icon` straight through, so an unset icon always serializes as an explicit `null` on the wire instead of being dropped. I checked all three places `RenderUpdatePayload.icon` is constructed in `profileRouter.ts` (the idle sweep, already correct at the time of the original review; the two just fixed) and confirmed no other code path builds a `render_update` from a live `Capability` without going through one of these three. The developer's decision not to change `Capability.icon`'s stored type (`string | undefined`) is sound: I traced every read of `.icon` on a live `Capability` object in both packages (`grep -rn "\.icon\b"` across `gatoway-core/src` and `stream-deck-plugin/src`) and confirmed the only places the "never set" vs. "explicitly reset" distinction is observable are exactly these three wire-construction sites, all of which are full, authoritative statements of a position's current display rather than partial deltas — so collapsing both cases to `null` at the wire boundary is correct and loses no information any other code path depends on.
+
+The developer added a regression test for each of QA's two original reproduction scenarios at both the unit level (`profileRouter.test.ts`, driving `ProfileRouter` directly) and the real-socket integration level (`focusProfileRouting.integration.test.ts`, a genuine TCP listener with test-double clients). I specifically checked that these tests assert on the wire form rather than a merely-falsy check that an omitted field would also satisfy: the integration tests decode incoming bytes via `JSON.parse(line)` on data read directly off the real socket (`TestDoubleClient`'s `data` handler, `focusProfileRouting.integration.test.ts:64-69`), and both the unit and integration versions of both tests assert `Object.prototype.hasOwnProperty.call(payload, "icon")` is `true` in addition to `payload.icon === null` — this is exactly the assertion shape needed to distinguish "explicit `null`" from "key absent," and I confirmed by inspection that an omitted-field regression (i.e. reverting to the pre-fix `icon: capability.icon`) would fail the `hasOwnProperty` assertion specifically, not just the value assertion. Ran the full suite: all four new regression tests pass, both packages' typecheck is clean, and nothing else regressed (104/104 gatoway-core tests, 61/61 stream-deck-plugin tests).
+
+QA-011 (`docs/PROTOCOL.md` staleness, Minor) is untouched by this commit, as expected — it was already correctly scoped in the original review as a documentation-only finding to route to `doc-writer` rather than block on. I re-confirmed it is still open: `docs/PROTOCOL.md` still shows `RenderUpdatePayload.icon` and `Capability.icon` as `icon?: string;` (lines 91, 234) with no `capability_update` section, unchanged from the original finding. This is not a regression introduced by the QA-010 fix — it was never in scope for it — but it remains an open item that should be routed to `doc-writer` before this change is archived.
+
+---
+
+## Per-finding re-verification
+
+| ID | Severity | Original location | Status now | Notes |
+|----|----------|--------------------|------------|-------|
+| QA-010 | Major | `gatoway-core/src/routing/profileRouter.ts:222-233,285-297` | **Resolved** | Both call sites now assert `capability.icon ?? null`; verified via code inspection, new unit + real-socket integration regression tests (which correctly assert wire-level key presence, not just falsiness), and full suite re-run. |
+| QA-011 | Minor | `docs/PROTOCOL.md`, `openspec/changes/focus-profile-routing/tasks.md:36` | **Open, unchanged** | Out of scope for this commit as expected. Confirmed still stale (no `capability_update` section; `icon?: string` shown without the `| null` reset semantics). Routing note stands: hand to `doc-writer` before archive, not a blocker on its own. |
+
+---
+
+## Regression check
+
+- **Typecheck:** `npm run typecheck` (root, runs both workspaces) — clean, no errors, both `gatoway-core` and `stream-deck-plugin`.
+- **Full test suite:** `npm test` (root) — `gatoway-core`: 17 test files, 104/104 passed. `stream-deck-plugin`: 13 test files, 61/61 passed. No failures, no skips other than the normal per-file test isolation.
+- **Targeted run of the four new QA-010 regression tests** (`npx vitest run -t "QA-010"`, from `gatoway-core/`): all four pass —
+  - `profileRouter.test.ts` › "QA-010 regression: sends icon:null (not omitted) when focus supersedes directly to a connection whose bound capability has no icon"
+  - `profileRouter.test.ts` › capability_update › "QA-010 regression: immediately re-renders icon:null (not omitted) when a capability_update explicitly resets icon to null"
+  - `focusProfileRouting.integration.test.ts` › "QA-010 regression: sends icon:null (not omitted) on the wire when focus supersedes directly to an app whose bound capability has no icon"
+  - `focusProfileRouting.integration.test.ts` › capability_update › "QA-010 regression: immediately re-renders icon:null on the wire when capability_update explicitly resets icon to null"
+- **Wire-form assertion check (the specific ask for this session):** confirmed all four new tests include `Object.prototype.hasOwnProperty.call(payload, "icon")` (or an equivalent full-object `toEqual` that would fail if the key were absent, in the unit tests) alongside `expect(payload.icon).toBeNull()`. The integration tests' `payload` comes from `JSON.parse(line)` on bytes read off a real, running TCP socket (`focusProfileRouting.integration.test.ts:64-69`, `startTcpListener`), not an in-memory object — so these assertions genuinely exercise the JSON-serialization boundary QA-010 was about, not just the pre-serialization JS value.
+- **No other regressions found.** Re-read the full `profileRouter.ts` (all 335 lines) to confirm the fix didn't touch or affect `handleInputEvent`, `handleFocus`, `handleDisconnect`, `sendIdleSweep`, or the `capability_update` sparse-merge logic (`profileRouter.ts:189-199`) — all unchanged from the previously-reviewed version. Diff for this commit (`git show --stat 0a151cc`) touches only `messages.ts` (doc comment only, no type change), `profileRouter.ts` (the two `?? null` additions plus explanatory comments), the two test files, and `tasks.md`.
+
+---
+
+## Observations carried forward
+
+- The two prior sessions' Observations (round-trip test coverage for `command`/`capability_update` envelopes; `ARCHITECTURE.md`'s stale `key_event` naming; `findStreamDeckConnection()`'s unhandled dual-Stream-Deck-connection race) remain unaddressed and are unaffected by this fix — none is a blocker, all previously logged as non-blocking.
+
+---
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-010 is confirmed resolved: the fix is correct, matches `design.md` D3/D4/D7's intent, is narrowly scoped to the two affected call sites, is backed by regression tests for both of QA's original reproduction scenarios at both the unit and real-socket-integration level, and those tests correctly assert wire-level key presence (not a check an omitted field would also satisfy). No new issues found; nothing else regressed. QA-011 (Minor, `docs/PROTOCOL.md` staleness) remains open but was never in scope for this fix and should not block progress on its own — route it to `doc-writer` before `/opsx:archive`, per the original review's recommendation. This change is ready to proceed to `/verify` for hands-on hardware confirmation.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of `focus-profile-routing` (branch `focus-profile-routing`, commit `0988a1f`) against real Elgato Stream Deck+ hardware, using a test-double application-plugin client (`gatoway-core/test/manual/testAppClient.ts`) since no real Lightroom/xDesign plugin exists yet.
+**Prepared for:** Technical Architect
+
+## Summary
+
+Every core mechanism this change introduces was confirmed live, on real hardware, with the user directly observing the physical device: generic Key/Dial actions replaced the old static Idle action correctly; the idle appearance renders by default once manually placed; a test-double app registering and reporting focus correctly drives real-time `render_update`s to the device; physical key presses and dial rotation correctly resolve to `command` messages delivered to the focused app; a live `capability_update` pushed with no physical input updates the display immediately (the change's headline feature); and both an explicit blur and a disconnect-while-focused correctly revert the device to the idle appearance with the icon properly reset (QA-010's fix, confirmed live via the actual JSON payloads in Gatoway core's log — `"icon":null` explicit on every idle-sweep entry). One new Minor, non-blocking finding surfaced: an overly long capability label overflows the physical key's title area.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-012 | Minor | `docs/PROTOCOL.md` (documentation gap) | No guidance exists on practical capability-label length; a label like "Fixture A (pushed)" (19 characters) visibly overflows the physical key's title display | Open |
+
+## Issue Detail
+
+### QA-012 · Minor · Documentation gap
+
+**What:** Capability `label`/`render_update` `label` fields are plain strings with no length guidance anywhere in `design.md`, the specs, or `docs/PROTOCOL.md`.
+
+**Scenario:** An application plugin author (Lightroom, xDesign, or beyond) declares or pushes a capability label without knowing there's a practical display limit, and it overflows/clips on the physical key.
+
+**Evidence:** Live-confirmed with the user: pushing a `capability_update` with `label: "Fixture A (pushed)"` (19 characters) via the manual test-app client correctly updated the display (functionally correct — this is not a functional defect), but the user observed the text rendered wider than the physical key and ran off-screen. Reverting to a shorter label ("Gatoway", 7 characters) via the idle sweep displayed correctly at normal width.
+
+**Impact:** Cosmetic only — the underlying mechanism (live label updates) works correctly. But without documented guidance, a future plugin author has no way to know what length is safe, and will likely discover this the same way this session did: by accident, on real hardware.
+
+**Suggested fix direction:** Not a code fix — Gatoway should not silently truncate or wrap app-supplied labels (that would hide meaningful content without the app's knowledge). The right fix is documentation: add practical label-length guidance to `docs/PROTOCOL.md`'s capability/`render_update` section (e.g. "keep labels short — the Stream Deck's physical key title area comfortably fits roughly 8-10 characters at default font size before clipping").
+
+**Root-cause level:** Documentation (interface-contract completeness), not code or design. Groups naturally with QA-011 (the other open `docs/PROTOCOL.md` gap) for `doc-writer` to address in one pass.
+
+## Checks Completed
+
+- **Generic action migration:** confirmed the Stream Deck software's action list now shows "Key" and "Dial" under the "Gatoway" category; the old "Idle" action and any previous placement of it were gone, consistent with `stream-deck-idle-display`'s REMOVED/ADDED delta.
+- **Idle appearance at baseline:** after manually placing the generic Key action at `{row:0,column:0}` and `{row:0,column:1}` and the generic Dial action at `{index:0}` (matching the test-fixture layout), both keys and the dial showed "Gatoway" with the default icon before any app connected — confirmed by the user.
+- **Live focus-driven rendering:** a test-double app client registered (`pluginType: "test-app"`, declaring the fixture's three capabilities) and reported `focus: true`; the user confirmed the two keys and dial updated to "Fixture A"/"Fixture B"/"Fixture Dial" in real time.
+- **Input forwarding, keypad:** pressing the physical "Fixture A" key produced `input_event` (`keyDown` then `keyUp`) in Gatoway core's log and a matching `command` (`capabilityId: "test-fixture.button.one"`) delivered to the test-app client, confirmed in its console output.
+- **Input forwarding, dial:** rotating the physical dial produced `input_event` (`rotate`, `delta: 1`) and a matching `command` delivered to the test-app client. (An initial attempt appeared to produce no event; traced to a test-harness artifact — a stray duplicate test-app-client process from an earlier setup attempt competing for the same input pipe, not a defect in the system under test. Cleaned up and re-verified cleanly with a single instance; result above is from the clean run.)
+- **Live capability_update while focused and bound:** pushing a `capability_update` for `test-fixture.button.one` with no physical input immediately updated the key's displayed label on real hardware, confirmed by the user watching the device — this is the change's headline new capability (`REQUIREMENTS.md` FR-001), and it works.
+- **Idle reset via explicit blur:** reporting `focus: false` reverted all three positions to "Gatoway" with the icon explicitly reset (`"icon":null` in the actual `render_update` payloads, confirmed in Gatoway core's log), and the user confirmed the display visually matched, at normal width.
+- **Idle reset via disconnect:** disconnecting the test-app client while it was the focused connection correctly cleared focus and reverted all three positions to idle, confirmed both in the log (`focus_changed` with `reason: "disconnect"`) and visually by the user.
+
+## Review Verdict (this session)
+
+**Recommendation:** ✅ **Pass** — Every mechanism this change introduces is confirmed working correctly on real hardware, including the two QA fix cycles that preceded this session (QA-006/007/008 areas untouched and still sound; QA-010's icon-reset fix specifically re-verified live via real log payloads, not just automated tests). One new Minor, non-blocking, documentation-only finding (QA-012) — groups with the already-open QA-011 for a single `doc-writer` pass covering both `docs/PROTOCOL.md` gaps (missing `capability_update` section, and now label-length guidance) before `/opsx:archive`.
