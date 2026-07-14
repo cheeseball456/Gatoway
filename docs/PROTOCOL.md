@@ -9,6 +9,12 @@ source. Kept in sync with `gatoway-core/src/protocol/messages.ts`, the single so
 truth for these shapes; if the two ever disagree, the source wins and this document is
 stale.
 
+Speaking the wire protocol correctly is necessary but not sufficient to see anything
+render: a capability also needs a physical position bound to it in the local layout
+config file, which is a separate, host-side concern from anything on this wire — see
+[`LAYOUT_CONFIG.md`](LAYOUT_CONFIG.md) for that file's schema, location, and a worked
+example.
+
 ## Transport and framing
 
 Gatoway core exposes two listeners, both bound to IPv4 loopback (`127.0.0.1`) only:
