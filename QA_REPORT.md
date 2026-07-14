@@ -442,3 +442,57 @@ All three previously-open findings (QA-006 Major, QA-007 Minor, QA-008 Minor) ar
 ## Final Review Verdict
 
 **Recommendation:** ✅ **Pass** — All three previously-open findings (1 Major, 2 Minor) are confirmed resolved by direct code inspection, a genuine clean-room rebuild (for QA-006), and a mutation test proving the new regression test is effective (for QA-008). The full suite (82 tests) passes and both packages type-check clean. No new issues were found. This change is ready for `/verify` with real or emulated Stream Deck hardware and, following that, `doc-writer` and `/opsx:archive`.
+
+---
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-14
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Hands-on execution of `stream-deck-plugin-skeleton` (branch `stream-deck-plugin-skeleton`, commit `d792109`) against real Elgato Stream Deck+ hardware and the real Stream Deck desktop application (not emulated).
+**Prepared for:** Technical Architect
+
+## Summary
+
+All core behaviors were confirmed live, on real hardware, with the user directly observing the physical device: the plugin loads under the real Stream Deck application, spawns Gatoway core as a genuine child process, connects and registers over TCP, renders its idle key correctly, survives a hard kill of the Gatoway core process with the key display unaffected, automatically restarts Gatoway core and reconnects, and produces no dynamic behavior on key press beyond the hardware's own built-in press animation. One environment/setup gotcha was discovered and resolved during the session (not a code defect). One real gap was found and, after discussion with the user, is being fixed: the plugin's manifest doesn't auto-provision a default profile, so nothing appears on the device until a user manually places the Idle action on a key — the user decided to fix this by adding a default profile.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-009 | Minor | `stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json` | Manifest has no `Profiles` entry, so the idle key never appears on the device until manually placed by the user — the `stream-deck-idle-display` spec's "renders... at plugin startup" wording assumes it appears with no manual step | Open |
+
+## Issue Detail
+
+### QA-009 · Minor · `stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json`
+
+**What:** Unlike the existing Lightroom plugin's manifest (which declares a `Profiles` array with `"DontAutoSwitchWhenInstalled": false`), Gatoway's manifest declares only an `Actions` entry with no `Profiles` section at all.
+
+**Scenario:** A user links and starts the plugin exactly as documented, expecting the idle profile described in the spec to be visible on their Stream Deck. Nothing appears until they separately discover they need to open the Stream Deck software, find the "Gatoway" category, and manually drag the "Idle" action onto a key themselves.
+
+**Evidence:** Live-verified with the user: after linking, enabling developer mode (see Observations below), and restarting the plugin, the physical device showed nothing until the Idle action was manually dragged onto a key — at which point the icon and title rendered correctly (confirmed by the user).
+
+**Impact:** The `stream-deck-idle-display` spec's requirement ("SHALL render its single static idle profile on the physical Stream Deck hardware at plugin startup") is not literally met without a manual, undocumented setup step. This is a real but low-severity gap — everything works correctly once the action is placed, and this is a one-time setup action, not a recurring problem — but it doesn't match the spec's stated behavior or the existing Lightroom plugin's more polished zero-touch precedent.
+
+**Suggested fix direction:** Discussed directly with the user, who decided: add a `Profiles` entry to `manifest.json` (matching the existing Lightroom plugin's approach for the `DeviceType`/general shape) but with `"DontAutoSwitchWhenInstalled": true` — unlike Lightroom's `false` — so installing/restarting the plugin does not forcibly switch the user's device away from whatever profile they're currently viewing. This is confirmed by the user as the desired resolution, not merely a suggestion.
+
+**Root-cause level:** Code (manifest configuration). `design.md` D5 didn't explicitly decide whether the idle profile should auto-install; this is a straightforward manifest addition consistent with the existing design intent, not a design decision that needs revisiting via `/design-architecture`.
+
+## Checks Completed
+
+- **Real plugin load under real Stream Deck software:** confirmed via `ps aux` showing a genuine Stream-Deck-spawned Node process running `com.gatoway.streamdeck.sdPlugin/bin/plugin.js`, after `streamdeck link` + `streamdeck restart`.
+- **Real child-process spawn of Gatoway core:** confirmed via `ps aux` showing `gatoway-core/dist/index.js` running as a distinct process, and via Gatoway core's own log recording `gatoway_core_started`.
+- **Real TCP registration:** Gatoway core's log shows `connection_accepted` → `connection_authenticated` → `authentication_succeeded` (`pluginType: "stream-deck"`) → `register_ack` (`status: "ok"`) for a real socket connection from the real plugin process, not a test harness.
+- **Idle key rendering:** user confirmed, looking at the physical device, that the icon and "Gatoway" title rendered correctly once the Idle action was placed on a key.
+- **Crash resilience, live:** killed the real Gatoway core child process (`kill -9`) while the user watched the physical key. User confirmed the key's display was unaffected — no flash, no blank state — consistent with `stream-deck-idle-display`'s "Idle profile remains shown while disconnected" scenario.
+- **Automatic restart and reconnect, live:** confirmed via `ps aux` (new PID) and the plugin's own log file (`com.gatoway.streamdeck.sdPlugin/logs/com.gatoway.streamdeck.0.log`), which recorded the full sequence: `gatoway_core_restarting` (reason: `signal: "SIGKILL"`) → `gatoway_core_spawned` (new PID) → `core_client_connecting` → transient `ECONNREFUSED` while the new process was still starting → retry with backoff → `core_client_connected`.
+- **No dynamic key behavior:** user pressed the physical key and, after clarifying the distinction, confirmed the only visible change was the Stream Deck hardware's own standard press-animation — no icon/title change, consistent with `stream-deck-idle-display`'s "No dynamic key behavior" scenario.
+
+## Observations
+
+- **Developer mode is required for locally-linked plugins to load at all**, and this isn't obvious from a code or manifest inspection alone — the Stream Deck application's own log recorded `"Feature only enabled in developer mode"` when a `streamdeck restart` was issued before developer mode was enabled, and the plugin process silently never started (no error surfaced anywhere in Gatoway's own logs, since the plugin process never even launched). This is standard Elgato SDK behavior (`streamdeck dev` enables it), not a Gatoway defect, but it's worth documenting in the eventual README/setup instructions so a future developer (or the user, on a fresh machine) doesn't lose time on it the way this session initially did.
+- The three carried-forward Observations from the prior static-review sessions (log-line verbosity nuance, the pinned `typescript@^7.0.2` pre-release, and the one-off clean-room build flake) still stand, unchanged and non-blocking.
+
+## Review Verdict (this session)
+
+**Recommendation:** ⚠️ **Conditional pass** — All core lifecycle, connection, resilience, and rendering behavior is confirmed working correctly on real hardware. One Minor finding (QA-009) is open, with a fix direction already agreed with the user (add a `Profiles` entry with `DontAutoSwitchWhenInstalled: true`). The main agent should route QA-009 to the `developer` subagent, then do a final confirmation pass (re-link and re-check the device) before moving to `doc-writer` and `/opsx:archive`. The developer-mode requirement should be captured in documentation, not fixed in code.
