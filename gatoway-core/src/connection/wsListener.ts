@@ -99,6 +99,9 @@ export function startWsListener(options: WsListenerOptions): Promise<WsListenerH
     });
   };
 
+  // Intentionally does not check `request.url` — any path on the WebSocket port is
+  // accepted (docs/PROTOCOL.md "Connecting: host and ports"). Only the port and the
+  // Origin header authenticate the upgrade; there is no path-based routing.
   const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const origin = request.headers.origin;
     if (!isOriginAllowed(origin, options.allowedOrigins)) {
