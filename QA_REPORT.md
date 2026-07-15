@@ -1264,3 +1264,68 @@ Both assertions genuinely exercise the fix — this is not a test that would pas
 **Recommendation:** ✅ **Pass** — QA-016 is confirmed resolved: the log now accurately distinguishes "at least one field applied" from "nothing applied," both new test assertions genuinely check the correct event, message, and structured content (not just that a log call happened), and the "at least one field applied" path's existing behavior is correctly preserved and now additionally carries `appliedFields`. Full test suites for both workspace packages pass (155/155, 65/65) and both typechecks are clean. No new issues were found. This change has no open Critical/Major/Minor issues remaining and is ready for `/verify` and, following that, `doc-writer` and `/opsx:archive`.
 
 ---
+
+# Interactive Verification Session (`/verify`) — 2026-07-15 — Live xDender integration
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** First real end-to-end connection from an actual third-party plugin (xDender, the xDesign browser extension) against a standalone Gatoway core instance, coordinated live with a separate xDender-side verification session. Not tied to a single OpenSpec change — this is a live protocol/deployment check against the system as it currently stands on `main`.
+**Prepared for:** Technical Architect
+
+## Summary
+
+xDender's WebSocket connection, registration, and focus reporting all worked correctly against real, live third-party data — a genuine, non-fixture confirmation that `validate-capability-payloads`' validation logic and the focus-tracking mechanism both hold up outside the test suite. However, this session also surfaced one real, pre-existing deployment gap (QA-017, Major, code/design-level) and one requirements-level finding (QA-018, Major) that changes the shape of what a future change needs to build. Root cause for QA-018 is **not** a defect in `persisted-layout-config` as specified — the spec was implemented correctly — but the requirement itself no longer matches what the project owner actually needs now that a real plugin is involved.
+
+## Live verification steps and observations
+
+1. **Environment check before connecting anything:** the Stream Deck-spawned Gatoway core instance (PID 79372, child of plugin PID 79371) had no `GATOWAY_ALLOWED_ORIGINS` set at all — confirmed via `ps eww` on the running process. Per `config.ts`, an unset allowlist defaults to `[]` (fail closed), which would have rejected xDender's Firefox `moz-extension://` origin outright. See QA-017 below.
+2. Stopped the Stream Deck-spawned instance (killing the plugin process; Elgato's own Stream Deck app auto-restarted it once, spawning a second uninstrumented instance on the same ports, which had to be stopped by quitting the Stream Deck application entirely) and started a standalone `gatoway-core` instance with `GATOWAY_ALLOWED_ORIGINS=moz-extension://*` set explicitly, confirmed via `ps eww` on the new process and a clean `gatoway_core_started` log line (`tcpPort: 47821`, `wsPort: 47822`).
+3. **xDender connected successfully:** log shows `connection_accepted` → `connection_authenticated` → `authentication_succeeded` (transport `websocket`) → `message_received` (`register`, `pluginType: "xdesign"`, 8 capabilities: `open-sidebar`, `create-sketch`, `line`, `rectangle`, `circle`, `extrude`, `fillet`, `chamfer`, all well-formed) → `registered` → `register_ack` sent with `status: "ok"`. **No follow-up `error` message was sent**, confirming all 8 real, live capabilities passed `validateCapability()` cleanly — the first live-data confirmation of `validate-capability-payloads`'s validation path outside its own test fixtures.
+4. **Focus tracking exercised live:** four `focus` messages arrived in sequence (`true` → `false` → `true` → `false`), each producing a correctly-sequenced `focus_changed` event with accurate `previousConnectionId`/`focusedConnectionId` transitions — matches `focus-tracking` spec exactly.
+5. Two earlier `authentication_failed` WebSocket attempts appear in the log (`origin: "https://www.google.com"`, and `origin: "https://oi000582862-eu1-makers-ifwe.3dexperience.3ds.com"` twice) — **confirmed by the user to be unrelated to xDender**, so not investigated further as part of this session; noted only as a curiosity for the user to check separately at their leisure (not a Gatoway-side defect either way — the allowlist correctly rejected an origin it wasn't configured to accept).
+6. Checked `layout.json`: contains only leftover `test-app`/`test-app-other` fixture profiles from earlier development sessions — no `xdesign` profile exists. None of xDender's 8 registered capabilities are bound to any physical position. This is expected given the current design (see QA-018), not a bug on its own — but it means the full `input_event` → `command` → capability-action round trip could not be exercised live in this session; only registration and focus were verified end-to-end.
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-017 | Major | Deployment/operational gap — `GATOWAY_ALLOWED_ORIGINS`, `gatoway-core/README.md` | No documented way exists to set `GATOWAY_ALLOWED_ORIGINS` (or any `GATOWAY_*` env var) for a Gatoway core instance spawned by the Stream Deck *application*, which is normally launched via the Dock/Finder (GUI), not a terminal shell — it never inherits a shell profile's exported env vars. Confirmed live: the running Stream Deck-spawned instance had no allowlist set at all. | Open |
+| QA-018 | Major | Requirements-level — layout/capability-position binding ownership | The protocol has no mechanism for a plugin to provide or suggest *any* layout information — `register` only declares capability shape (id/label/type/icon/state), nothing about desired position. `persisted-layout-config`'s design (correctly implemented as specified) made position-binding 100% host-side and hand-authored, with zero plugin input, deferring any UI for it as post-MVP (`REQUIREMENTS.md` open question #4). The user has now clarified their original intent was that the extension itself would provide/suggest a layout — a materially different model than what was built. This is not a code or design defect in the existing change; the requirement itself needs to be revisited. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect/requirements-owner attention
+
+## Issue Detail
+
+### QA-017 · Major · Deployment/operational gap
+
+**What:** `GATOWAY_ALLOWED_ORIGINS` (and every other `GATOWAY_*` override) is only ever read from `process.env` at Gatoway core startup. When Gatoway core is spawned as a child of the Stream Deck plugin (`AD-1`), and the Stream Deck *application* itself is launched via the Dock/Finder/Login Items rather than a terminal, there is no path by which a user-exported shell environment variable reaches that process tree at all.
+
+**Scenario:** Any real end user (or the project owner, day-to-day) who wants WebSocket-based plugins to work needs a persistent way to set `GATOWAY_ALLOWED_ORIGINS` for a GUI-launched Stream Deck app — every session, not just this one-off terminal-launched standalone test.
+
+**Evidence:** Live-confirmed: `ps eww <pid>` on the Stream Deck-spawned Gatoway core process showed only `GATOWAY_TCP_PORT`/`GATOWAY_TOKEN_FILE` set (both of which come from the plugin's own `coreProcessSupervisor.ts` passing them explicitly to `spawn()`), with no `GATOWAY_ALLOWED_ORIGINS` anywhere. A `launchctl setenv` workaround exists on macOS but is undocumented, macOS-specific, and not a real cross-platform solution.
+
+**Impact:** Any browser-based plugin (xDender today, any future one) cannot connect at all through the normal, GUI-launched Stream Deck path — only through a manually-started standalone instance, which isn't how the product is meant to run day-to-day.
+
+**Suggested fix direction:** Not prescribing the mechanism, but the outcome needed is that `GATOWAY_ALLOWED_ORIGINS` (and likely the other `GATOWAY_*` overrides) can be configured persistently for the Stream Deck-spawned instance without relying on shell environment inheritance — e.g. the Stream Deck plugin's own config file/Property Inspector passing it through to `coreProcessSupervisor.ts`'s `spawn()` call, similar to how `GATOWAY_TCP_PORT`/`GATOWAY_TOKEN_FILE` are already passed today.
+
+### QA-018 · Major · Requirements-level
+
+**What:** No message in the protocol lets a plugin communicate anything about desired physical layout. `Capability` (declared in `register`) has no position hint of any kind. The entire position-to-capability binding lives in a separate, local, hand-authored JSON file (`layout.json`) that Gatoway core reads once at its own startup — completely disconnected from anything a plugin sends.
+
+**Scenario:** A real plugin author (xDender) or the project owner, onboarding a new plugin with several capabilities (xDesign declared 8), currently has no way to get any of them onto the physical device without manually hand-writing JSON bindings and restarting Gatoway core — and the Stream Deck application itself only ever offers a generic, unlabeled "Key"/"Dial" action to drag onto the grid, with no indication anywhere in the Stream Deck UI of what capabilities exist or how to wire one up.
+
+**Evidence:** `docs/LAYOUT_CONFIG.md` states explicitly: "This is a local, per-machine config file, not part of the wire protocol — it is read once by Gatoway core at its own startup, not exchanged with any plugin over TCP or WebSocket." `REQUIREMENTS.md` records this as an intentional, deferred scope decision: "No-code mapping/configuration UI... Deferred because the immediate need is developer-driven." The user has now stated this was based on an assumption "that the extension would provide the layout" — i.e., the original intent differs from what was actually specified and built.
+
+**Impact:** Blocks any realistic path to onboarding a real plugin's capabilities onto physical positions without hand-editing JSON and restarting Gatoway core — acceptable for solo developer testing, but confirmed by the user to not match their actual intent for how this should work, even at the current stage.
+
+**Suggested fix direction:** Not prescribing a solution — this needs a `/gather-requirements` pass to establish what the user actually wants (e.g., does a plugin send a *suggested* default layout at `register` time that Gatoway core auto-applies or offers as a starting point? Does this require `layout.json` to become dynamically updatable rather than read-once-at-startup? How do multiple simultaneous connections of the same `pluginType` resolve conflicting suggestions?) before any design or implementation work proceeds.
+
+## Testing Coverage Assessment
+
+This session was live/manual only (real WebSocket connection from the actual xDender extension) — no new automated tests were written or expected, since nothing in this session is a code change. Existing automated coverage (`gatoway-core`'s 155 unit/integration tests, particularly `capabilityValidation.test.ts` and `messageHandler.test.ts`) already covers the validation logic this session confirmed live; this session's value is confirming that coverage holds against uncontrolled, real-world plugin data rather than adding new coverage.
+
+## Review Verdict
+
+**Recommendation:** ❌ **Requires fixes** — Both QA-017 and QA-018 are Major and block real-world usability of the WebSocket transport path as currently deployed. QA-017 is a code/design-level gap the `developer`/architect can address directly. QA-018 is a requirements-level finding — per this project's own routing rules, it must go through `/gather-requirements` to confirm the intended behavior before any design or code work begins; do not patch this in code or design without that step, since doing so risks building the wrong mechanism a second time. Registration and focus-tracking behavior are otherwise confirmed correct against live, real-world plugin data.
+
+---
