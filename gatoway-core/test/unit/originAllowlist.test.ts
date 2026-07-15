@@ -19,4 +19,45 @@ describe("originAllowlist", () => {
   it("rejects any origin against an empty allowlist (fail closed)", () => {
     expect(isOriginAllowed("chrome-extension://abc123", [])).toBe(false);
   });
+
+  describe("wildcard entries", () => {
+    const wildcardAllowlist = ["moz-extension://*"];
+
+    it("accepts multiple different origins sharing the wildcard's prefix", () => {
+      expect(isOriginAllowed("moz-extension://aaaa-uuid", wildcardAllowlist)).toBe(true);
+      expect(isOriginAllowed("moz-extension://bbbb-uuid", wildcardAllowlist)).toBe(true);
+    });
+
+    it("rejects an origin with a different scheme/prefix", () => {
+      expect(isOriginAllowed("chrome-extension://foo", wildcardAllowlist)).toBe(false);
+    });
+
+    it("accepts origins matching either an exact or a wildcard entry in a mixed allowlist", () => {
+      const mixed = ["chrome-extension://abc123", "moz-extension://*"];
+      expect(isOriginAllowed("chrome-extension://abc123", mixed)).toBe(true);
+      expect(isOriginAllowed("moz-extension://any-uuid-at-all", mixed)).toBe(true);
+      expect(isOriginAllowed("chrome-extension://evil000", mixed)).toBe(false);
+    });
+
+    it("treats a bare '*' entry as matching any origin (empty-string prefix)", () => {
+      expect(isOriginAllowed("chrome-extension://anything", ["*"])).toBe(true);
+      expect(isOriginAllowed("moz-extension://anything-else", ["*"])).toBe(true);
+    });
+
+    it("does NOT treat a '*' in a non-trailing position as a wildcard (QA-015)", () => {
+      // design.md D1 scopes this change to a single *trailing* wildcard only. An
+      // entry with `*` anywhere else must be treated as an exact-match literal, not
+      // a prefix/suffix/glob pattern.
+      const leadingWildcard = ["*moz-extension://bar"];
+      expect(isOriginAllowed("moz-extension://bar", leadingWildcard)).toBe(false);
+      expect(isOriginAllowed("xmoz-extension://bar", leadingWildcard)).toBe(false);
+      expect(isOriginAllowed("*moz-extension://bar", leadingWildcard)).toBe(true);
+
+      const midStringWildcard = ["moz-extension://*foo"];
+      expect(isOriginAllowed("moz-extension://foo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://xfoo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://anythingfoo", midStringWildcard)).toBe(false);
+      expect(isOriginAllowed("moz-extension://*foo", midStringWildcard)).toBe(true);
+    });
+  });
 });

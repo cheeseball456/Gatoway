@@ -92,7 +92,7 @@ the running instance.
 | `GATOWAY_CONFIG_DIR` | Per-OS user config dir (see below) | Base directory for the auth token file, if `GATOWAY_TOKEN_FILE` isn't set |
 | `GATOWAY_TOKEN_FILE` | `<config dir>/auth-token` | Path to the auth token file (native/TCP plugins read this to authenticate) |
 | `GATOWAY_LAYOUT_FILE` | `<config dir>/layout.json` | Path to the layout config file (position-to-capability bindings, per plugin type); see [Layout config file](#layout-config-file) |
-| `GATOWAY_ALLOWED_ORIGINS` | *(empty — fail closed)* | Comma-separated list of allowlisted WebSocket `Origin` values (e.g. `chrome-extension://<id>`). No origins are allowed by default, so no WebSocket connection succeeds until this is set |
+| `GATOWAY_ALLOWED_ORIGINS` | *(empty — fail closed)* | Comma-separated list of allowlisted WebSocket `Origin` values. Each entry is either an exact match (e.g. `chrome-extension://<id>`) or a trailing-wildcard prefix match (e.g. `moz-extension://*`) — see [Auth token file](#auth-token-file) below for which to use per browser. No origins are allowed by default, so no WebSocket connection succeeds until this is set |
 | `GATOWAY_LOG_DIR` | Per-OS user log dir (see below) | Base directory for the log file, if `GATOWAY_LOG_FILE` isn't set |
 | `GATOWAY_LOG_FILE` | `<log dir>/gatoway-core.log` | Path to the active rotating log file |
 | `GATOWAY_LOG_MAX_SIZE_BYTES` | `10485760` (10 MB) | Log rotation size threshold |
@@ -121,7 +121,20 @@ authenticate; see [`plugin-authentication`
 spec](../openspec/specs/plugin-authentication/spec.md).
 
 WebSocket (browser-extension) connections do not use the token; they are checked
-instead against the `GATOWAY_ALLOWED_ORIGINS` allowlist at the HTTP-upgrade stage.
+instead against the `GATOWAY_ALLOWED_ORIGINS` allowlist at the HTTP-upgrade stage. An
+entry ending in `*` is a trailing-wildcard prefix match; any other entry requires an
+exact match, unchanged from before wildcard support was added
+(`wildcard-origin-allowlist`). Recommended values differ by browser:
+
+- **Chrome:** pin the exact, stable extension id, e.g. `chrome-extension://<the real id>`
+  — Chrome's published/signed extension ids are deterministic across every install, so
+  an exact match is both possible and preferable (narrower than a wildcard).
+- **Firefox:** use `moz-extension://*`. Firefox generates a random internal UUID per
+  installation that appears in the `Origin` header regardless of any static id set in
+  the manifest, so an exact-match entry can never be correctly pre-configured for a
+  Firefox extension — only the wildcard form works at all.
+
+Set both, comma-separated, to support both browsers: `GATOWAY_ALLOWED_ORIGINS=chrome-extension://<id>,moz-extension://*`.
 
 ### Layout config file
 

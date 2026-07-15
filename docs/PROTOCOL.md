@@ -77,7 +77,19 @@ capability manifest.
   with user-only read permission). An invalid or missing token is rejected.
 - **WebSocket (browser) connections** authenticate via the `Origin` header at the
   HTTP-upgrade stage, before this message is even sent — `token` is not required (and
-  is ignored if present) on this transport.
+  is ignored if present) on this transport. The header is checked against
+  `GATOWAY_ALLOWED_ORIGINS`, a comma-separated allowlist supporting two entry shapes
+  (wildcard-origin-allowlist):
+  - An **exact-match** entry (e.g. `chrome-extension://<id>`) matches only that literal
+    origin. Recommended for Chrome, whose published/signed extension id is deterministic
+    and stable across every install — pin it precisely.
+  - A **trailing-wildcard** entry (e.g. `moz-extension://*`) matches any origin sharing
+    the prefix before the `*`. Recommended for Firefox: per Mozilla's own documentation,
+    Firefox generates a random internal UUID for every installation of an extension, and
+    that UUID (not any static id set in the manifest) is what appears in the `Origin`
+    header, so an exact-match entry can never be correctly pre-configured for a Firefox
+    extension. Only a single trailing `*` is supported — this is a prefix match, not a
+    general glob/regex.
 - Sending `register` again on an already-authenticated connection re-declares its
   capability manifest without repeating the credential check. Omitting `capabilities`
   on a re-registration leaves the previously-declared manifest unchanged; an explicit
