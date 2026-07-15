@@ -462,6 +462,17 @@ interface CommandPayload {
 }
 ```
 
+**Gesture timing is the receiving plugin's responsibility, not Gatoway's.** Neither
+Gatoway core nor the Stream Deck plugin does any debouncing or timing analysis — a
+`keyDown`/`keyUp` pair is forwarded as two separate `command` messages exactly as
+reported, and `CommandPayload` doesn't even carry a timestamp. This is deliberate, per
+AD-8: the Stream Deck plugin has zero app-specific knowledge, and Gatoway core's job
+stops at resolving position → capability, never gesture semantics. So double-press
+detection, long-press detection, or distinguishing a quick tap from a held key is
+entirely up to the application plugin receiving the `command` messages — it must track
+its own event timestamps per `capabilityId` across successive messages it receives.
+Gatoway does not, and will not, provide this itself.
+
 > **Implementation note:** this message type is not part of the original design
 > document's enumerated set of new message types for this change (`focus`,
 > `input_event`, `render_update`) — it was added as a minimal, necessary fill of a gap
