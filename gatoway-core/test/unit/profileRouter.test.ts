@@ -494,6 +494,87 @@ describe("ProfileRouter", () => {
       expect(manager.get(backgroundApp.id)?.capabilities?.[0]?.label).toBe("Updated");
     });
 
+    // validate-capability-payloads tasks.md 3.5: an invalid field is not applied, a
+    // follow-up error names it, and other valid fields in the same message still apply.
+    it("applies only the valid fields and sends a follow-up error naming the rejected field", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, layoutResolver: fakeLayoutResolver(), logger });
+      const sent: unknown[] = [];
+      const app = acceptConnection(manager, sent);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", [{ ...CAP_ONE }]);
+
+      router.handleCapabilityUpdate(app, {
+        capabilityId: "cap.one",
+        label: "Valid Label",
+        state: "not-a-number" as unknown as number,
+      });
+
+      expect(manager.get(app.id)?.capabilities?.[0]).toEqual({
+        id: "cap.one",
+        label: "Valid Label",
+        type: "button",
+        icon: "one.png",
+      });
+      expect(sent).toEqual([
+        {
+          type: "error",
+          connectionId: app.id,
+          payload: {
+            message: "one or more capability_update fields were invalid and were not applied",
+            details: { rejectedFields: [{ field: "state", reason: '"state" must be a number' }] },
+          },
+        },
+      ]);
+    });
+
+    it("applies no changes and reports every field when all fields in the update are invalid", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, layoutResolver: fakeLayoutResolver(), logger });
+      const sent: unknown[] = [];
+      const app = acceptConnection(manager, sent);
+      manager.transition(app.id, "authenticated");
+      const original = { ...CAP_ONE };
+      manager.setPluginInfo(app.id, "test-app", [original]);
+
+      router.handleCapabilityUpdate(app, {
+        capabilityId: "cap.one",
+        icon: 42 as unknown as string,
+        label: 7 as unknown as string,
+        state: "bad" as unknown as number,
+      });
+
+      expect(manager.get(app.id)?.capabilities).toEqual([original]);
+      const errorMessage = sent.find((m) => (m as { type: string }).type === "error") as
+        | { payload: { details: { rejectedFields: { field: string; reason: string }[] } } }
+        | undefined;
+      expect(errorMessage).toBeDefined();
+      expect(errorMessage?.payload.details.rejectedFields.map((r) => r.field)).toEqual([
+        "icon",
+        "label",
+        "state",
+      ]);
+    });
+
+    it("sends no error when every field in the update is valid", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, layoutResolver: fakeLayoutResolver(), logger });
+      const sent: unknown[] = [];
+      const app = acceptConnection(manager, sent);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", [{ ...CAP_ONE }]);
+
+      router.handleCapabilityUpdate(app, { capabilityId: "cap.one", label: "Fine" });
+
+      expect(sent.filter((m) => (m as { type: string }).type === "error")).toEqual([]);
+    });
+
     it("no-ops a capability_update for a capability id the sender never declared", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);

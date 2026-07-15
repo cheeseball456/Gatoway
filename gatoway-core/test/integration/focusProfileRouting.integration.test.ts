@@ -483,6 +483,96 @@ describe("focus tracking + profile routing (integration)", () => {
     });
   });
 
+  describe("capability payload validation (validate-capability-payloads)", () => {
+    it("registers successfully with only the valid capabilities and sends a follow-up error naming the rejected one", async () => {
+      const { port, token } = await start();
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", [
+        ...FIXTURE_CAPABILITIES,
+        { id: "", label: "Malformed", type: "button" },
+      ] as unknown as Capability[]);
+      clients.push(app);
+
+      const [errorMessage] = await app.waitForMessageType("error");
+      expect(
+        (
+          errorMessage.payload as {
+            details: { rejectedCapabilities: { index: number; reason: string }[] };
+          }
+        ).details.rejectedCapabilities,
+      ).toEqual([{ index: 3, reason: '"id" must be a non-empty string' }]);
+
+      // Registration still succeeded with the valid capabilities: focusing and
+      // resolving an input_event against one of them still works end to end.
+      app.send({ type: "focus", payload: { focused: true } });
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      streamDeck.send({
+        type: "input_event",
+        payload: { controller: "keypad", position: { row: 0, column: 0 }, eventType: "keyDown" },
+      });
+      const [command] = await app.waitForMessageType("command");
+      expect(command.payload).toEqual({
+        capabilityId: "test-fixture.button.one",
+        eventType: "keyDown",
+        delta: undefined,
+      });
+    });
+
+    it("registers with an empty manifest and sends a follow-up error when every declared capability is malformed", async () => {
+      const { port, token } = await start();
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", [
+        { id: "", label: "Malformed", type: "button" },
+        { id: "cap.two", label: "Two", type: "not-a-real-type" },
+      ] as unknown as Capability[]);
+      clients.push(app);
+
+      const [ack] = await app.waitForMessageType("register_ack");
+      expect((ack.payload as { status: string }).status).toBe("ok");
+
+      const [errorMessage] = await app.waitForMessageType("error");
+      expect(
+        (
+          errorMessage.payload as {
+            details: { rejectedCapabilities: { index: number; reason: string }[] };
+          }
+        ).details.rejectedCapabilities,
+      ).toHaveLength(2);
+    });
+
+    it("applies only valid fields on a mixed-validity capability_update and sends a follow-up error", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3);
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      clients.push(app);
+      app.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6);
+
+      app.send({
+        type: "capability_update",
+        payload: {
+          capabilityId: "test-fixture.button.one",
+          label: "Valid Label",
+          state: "not-a-number",
+        },
+      });
+
+      const [errorMessage] = await app.waitForMessageType("error");
+      expect(
+        (errorMessage.payload as { details: { rejectedFields: { field: string; reason: string }[] } })
+          .details.rejectedFields,
+      ).toEqual([{ field: "state", reason: '"state" must be a number' }]);
+
+      const updates = await streamDeck.waitForMessageType("render_update", 7);
+      expect((updates[6].payload as { label?: string }).label).toBe("Valid Label");
+    });
+  });
+
   describe("reconnection (document-plugin-reconnection)", () => {
     it("gives a reconnecting connection no capabilities or focus until it re-registers and re-asserts focus", async () => {
       const { port, token } = await start();

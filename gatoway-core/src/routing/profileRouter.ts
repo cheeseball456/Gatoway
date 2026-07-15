@@ -1,9 +1,10 @@
 import type { ConnectionManager } from "../connection/connectionManager.js";
-import { sendMessage } from "../connection/messageHandler.js";
+import { sendError, sendMessage } from "../connection/messageHandler.js";
 import type { ProtocolRouter } from "../connection/protocolRouter.js";
 import type { ConnectionRecord } from "../connection/types.js";
 import type { FocusTracker } from "../focus/focusTracker.js";
 import type { Logger } from "../logging/logger.js";
+import { validateCapabilityUpdateFields } from "../protocol/capabilityValidation.js";
 import type {
   CapabilityUpdatePayload,
   CommandPayload,
@@ -192,16 +193,44 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
 
-    if (payload.icon !== undefined) {
-      // `null` is an explicit reset to "no icon" on the stored record (mirrors
-      // render_update's manifest-default-reset semantics); omitted means unchanged.
-      capability.icon = payload.icon === null ? undefined : payload.icon;
+    // validate-capability-payloads design.md D1/D2: each field is validated
+    // independently; a field that fails validation is not applied (the stored value
+    // for that field is left unchanged, exactly as if the field had been omitted),
+    // while any other, validly-typed fields in the same message still apply.
+    const validation = validateCapabilityUpdateFields(payload);
+    const rejectedFields: { field: string; reason: string }[] = [];
+
+    if (validation.icon) {
+      if (validation.icon.ok) {
+        // `null` is an explicit reset to "no icon" on the stored record (mirrors
+        // render_update's manifest-default-reset semantics); omitted means unchanged.
+        capability.icon = validation.icon.value === null ? undefined : validation.icon.value;
+      } else {
+        rejectedFields.push({ field: "icon", reason: validation.icon.reason });
+      }
     }
-    if (payload.label !== undefined) {
-      capability.label = payload.label;
+    if (validation.label) {
+      if (validation.label.ok) {
+        capability.label = validation.label.value;
+      } else {
+        rejectedFields.push({ field: "label", reason: validation.label.reason });
+      }
     }
-    if (payload.state !== undefined) {
-      capability.state = payload.state;
+    if (validation.state) {
+      if (validation.state.ok) {
+        capability.state = validation.state.value;
+      } else {
+        rejectedFields.push({ field: "state", reason: validation.state.reason });
+      }
+    }
+
+    if (rejectedFields.length > 0) {
+      sendError(
+        connection,
+        this.logger,
+        "one or more capability_update fields were invalid and were not applied",
+        { rejectedFields },
+      );
     }
 
     this.logger.info(
