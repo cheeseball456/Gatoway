@@ -269,9 +269,13 @@ effect on the next full restart (`streamdeck restart` after this plugin's own pr
 restarts, or a manual `npm run dev`/`npm start` restart). A missing or malformed file
 never prevents the plugin from starting or from spawning Gatoway core: it falls back to
 an empty allowlist (today's fail-closed default — no WebSocket connection succeeds) and
-logs exactly why (`allowed_origins_config_missing` / `allowed_origins_config_invalid_json`
-/ `allowed_origins_config_invalid_shape` / `allowed_origins_config_loaded`), mirroring
-`docs/LAYOUT_CONFIG.md`'s `layout.json` four-case log pattern exactly.
+logs exactly why (`allowed_origins_config_missing` if no file exists at the path;
+`allowed_origins_config_read_failed` if the file exists but can't be read, e.g. a
+permissions error; `allowed_origins_config_invalid_json` if it isn't valid JSON;
+`allowed_origins_config_invalid_shape` if it's valid JSON but doesn't match the schema
+above; or `allowed_origins_config_loaded` on success), mirroring `layout.json`'s own
+`layoutStore.ts` log pattern (`docs/LAYOUT_CONFIG.md`) for local config files in this
+project.
 
 This file is unrelated to `layout.json` (position-to-capability bindings) — a separate
 file for a separate concern, connection authentication rather than what renders where.

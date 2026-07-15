@@ -106,6 +106,14 @@ capability manifest.
     header, so an exact-match entry can never be correctly pre-configured for a Firefox
     extension. Only a single trailing `*` is supported — this is a prefix match, not a
     general glob/regex.
+  - Exporting `GATOWAY_ALLOWED_ORIGINS` directly works for a manually-started standalone
+    `gatoway-core` process, but not for the common case of Gatoway core spawned by the
+    Stream Deck application: a GUI-launched process never inherits a shell's exported
+    environment variables, so this variable is silently never set that way. See
+    [`stream-deck-plugin/README.md`'s "Allowing browser-based (WebSocket) plugins:
+    `allowed-origins.json`" section](../stream-deck-plugin/README.md#allowing-browser-based-websocket-plugins-allowed-originsjson)
+    for the local config file that plugin reads instead, and forwards into its spawned
+    Gatoway core child's environment.
 - Sending `register` again on an already-authenticated connection re-declares its
   capability manifest without repeating the credential check. Omitting `capabilities`
   on a re-registration leaves the previously-declared manifest unchanged; an explicit
