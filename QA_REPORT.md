@@ -1119,7 +1119,7 @@ Full test suite: `gatoway-core` 155/155 passing (up from 129 before this change)
 
 | ID | Severity | Location | Description | Status |
 |----|----------|----------|-------------|--------|
-| QA-016 | Minor | `gatoway-core/src/routing/profileRouter.ts:236-239` | The `capability_updated` log event unconditionally logs "applied live capability_update to stored capability record" even in the case where every field in the update was rejected and nothing was actually applied. | Open |
+| QA-016 | Minor | `gatoway-core/src/routing/profileRouter.ts:231-256` | The `capability_updated` log event unconditionally logged "applied live capability_update to stored capability record" even when every field in the update was rejected and nothing was actually applied. | **Resolved (commit `1c66228`)** |
 
 **Status values:**
 - `Open` — not yet fixed; needs architect attention
@@ -1184,3 +1184,83 @@ Manual/live verification (real TCP wire order, real error payload contents) was 
 ## Review Verdict
 
 **Recommendation:** ⚠️ **Conditional pass** — No Critical or Major issues. Every area this session was specifically asked to scrutinize — genuine partial acceptance at both the capability-array and field level, `register_ack`-before-`error` ordering (confirmed live, not just asserted), the register-vs-`capability_update` `icon`/`null` asymmetry, per-entry/per-field independence, and the `error` payload's `details` shape — is implemented correctly and is well-tested. One Minor, code-level finding (QA-016: a pre-existing log line not updated to account for the new "nothing was applied" case) is open but non-blocking; the architect/developer may fix it now or defer it. This change is ready for `/verify` once QA-016 is triaged.
+
+---
+---
+
+# Re-verification Session — 2026-07-15 — `validate-capability-payloads` (QA-016)
+
+**Reviewer:** QA Engineer
+**Scope:** Re-review of commit `1c66228` ("validate-capability-payloads: fix QA-016 - inaccurate capability_updated log") against the QA-016 finding above. Diff reviewed: `git show 1c66228` (`gatoway-core/src/routing/profileRouter.ts`, `gatoway-core/test/unit/profileRouter.test.ts`). Full test suite and typecheck re-run for both workspace packages on the current working tree (branch `validate-capability-payloads`, HEAD `1c66228`).
+**Prepared for:** Technical Architect
+
+## Summary
+
+QA-016 is resolved as claimed. `handleCapabilityUpdate` (`profileRouter.ts:200-256`) now tracks an `appliedFields` array alongside the pre-existing `rejectedFields`, and the previously-unconditional `capability_updated` log is now gated on `appliedFields.length > 0`: when at least one field was actually applied it logs the existing `capability_updated` event (now additionally carrying the `appliedFields` list), and when nothing was applied it logs a distinct `capability_update_not_applied` event carrying `rejectedFields`, with wording ("applied no fields to stored capability record") that no longer claims something happened when it didn't. Both new assertions in `profileRouter.test.ts` check the correct event name, the correct message string, and the correct structured content — not merely "some `logger.info` call occurred." No regressions found: full `gatoway-core` suite (155/155) and `stream-deck-plugin` suite (65/65, unaffected — no files in that package touched) both pass, and both packages' `tsc --noEmit` are clean.
+
+## Re-verification of QA-016
+
+**What was checked:** Read the full current body of `handleCapabilityUpdate` (`profileRouter.ts:180-287`) end to end, not just the diff hunk, to confirm the new `appliedFields` tracking is wired correctly against the pre-existing `rejectedFields` tracking and doesn't change any other behavior (field-application logic, `sendError` call, the post-update render sweep). Then read both modified/added test blocks in full and ran the actual suite rather than trusting the test names alone.
+
+**Code correctness, traced field-by-field:**
+- `appliedFields: string[] = []` is declared alongside the pre-existing `rejectedFields` and pushed to in the same three `if (validation.X.ok)` branches that already mutate `capability.X` — i.e., `appliedFields` is populated exactly where (and only where) the stored record is actually written, not inferred separately. There's no path where a field is applied without also being pushed to `appliedFields`, or vice versa.
+- The gating condition (`if (appliedFields.length > 0) { ...capability_updated... } else { ...capability_update_not_applied... }`) is a clean if/else — exactly one of the two events fires per call, never both, never neither. This directly fixes the original defect: a case with all fields rejected now produces zero `capability_updated` log calls (confirmed below), instead of one falsely-worded one.
+- The `else` branch's `rejectedFields` will correctly be `[]` (not misleading) for the edge case where a `capability_update` supplies none of `icon`/`label`/`state` at all (e.g. only `capabilityId`) — no test in the suite exercises this specific zero-fields-present case, but I traced it directly: `validation.icon`/`.label`/`.state` would all be `undefined` (falsy), so none of the three `if` blocks execute, `appliedFields` and `rejectedFields` both stay `[]`, and the `else` branch logs `capability_update_not_applied` with `rejectedFields: []`. This is accurate (nothing was applied and nothing was rejected — there was simply nothing to act on) and is a pre-existing, harmless gap in test coverage rather than a defect introduced by this fix; not blocking.
+- The `sendError` call (only reached when `rejectedFields.length > 0`) and the render-sweep logic below the log block are both untouched by this diff, and I confirmed by reading the surrounding lines that neither was accidentally affected by the refactor (e.g. no accidental early return was introduced by the new `if`/`else`).
+
+**Test correctness — "at least one field applied" path** (`profileRouter.test.ts:499-536`, "applies only the valid fields and sends a follow-up error naming the rejected field"): the scenario applies a valid `label` and an invalid `state`. The new assertion is:
+```ts
+expect(logger.info).toHaveBeenCalledWith(
+  expect.objectContaining({ event: "capability_updated", appliedFields: ["label"] }),
+  "applied live capability_update to stored capability record",
+);
+```
+This asserts on the specific `event` name, the specific `appliedFields` content (not just "was called"), and the exact message string — a real content assertion, not a call-count check. I confirmed by tracing the code that `appliedFields` here is genuinely `["label"]` (icon was never present in this payload so its `if (validation.icon)` guard never runs; state was rejected so never pushed) — the test's expected value matches the actual code path exactly, not a coincidentally-passing loose match.
+
+**Test correctness — "all fields rejected" path** (`profileRouter.test.ts:538-585`, "applies no changes and reports every field when all fields in the update are invalid"): this is the exact scenario the original QA-016 finding cited. The new assertions are:
+```ts
+expect(logger.info).not.toHaveBeenCalledWith(
+  expect.objectContaining({ event: "capability_updated" }),
+  expect.anything(),
+);
+expect(logger.info).toHaveBeenCalledWith(
+  expect.objectContaining({
+    event: "capability_update_not_applied",
+    connectionId: app.id,
+    capabilityId: "cap.one",
+    rejectedFields: [
+      { field: "icon", reason: '"icon" must be a string or null' },
+      { field: "label", reason: '"label" must be a string' },
+      { field: "state", reason: '"state" must be a number' },
+    ],
+  }),
+  "capability_update applied no fields to stored capability record",
+);
+```
+This is precisely the right pair of assertions to close the original gap: the first proves the old, inaccurate `capability_updated` event genuinely never fires in this scenario (not just "some other event also fired"), and the second proves the *correct* event fires, with the *correct* event name, the *correct* connection/capability identifiers, the *correct* full `rejectedFields` content (all three fields, correct reasons, correct order), and the *correct* message string. I ran this exact test in isolation to confirm it passes against the real (non-mocked-away) code path, not just read it:
+
+```
+$ npx vitest run --run -t "applies no changes and reports every field when all fields in the update are invalid"
+ Test Files  1 passed | 18 skipped (19)
+      Tests  1 passed | 154 skipped (155)
+```
+
+Both assertions genuinely exercise the fix — this is not a test that would pass equally well against the old, buggy code (I confirmed this by mentally reverting the gating logic: the old unconditional `capability_updated` log would immediately fail the `not.toHaveBeenCalledWith` assertion, and the `capability_update_not_applied` event wouldn't exist at all, failing the second assertion outright).
+
+## Regression check
+
+- Ran `npm test` in `gatoway-core/`: **155/155 tests passing** across all test files — unchanged in count from the pre-fix baseline recorded in the original static review session (the fix's new assertions were added inside two pre-existing `it` blocks rather than as new test cases, so the total test count is expected to stay the same; confirmed this matches the diff, which adds no new `it(...)` blocks).
+- Ran `npx tsc --noEmit -p tsconfig.json` in `gatoway-core/`: **clean, zero errors.**
+- Ran `npm test` in `stream-deck-plugin/`: **65/65 tests passing**, and `npx tsc --noEmit -p tsconfig.json` clean — confirmed unaffected, since `git diff --stat` for commit `1c66228` shows only `gatoway-core/src/routing/profileRouter.ts` and `gatoway-core/test/unit/profileRouter.test.ts` touched.
+- Reviewed `git show 1c66228` in full (not just the two touched functions in isolation) to confirm no unrelated lines were altered; the diff is confined exactly to the described fix and its two targeted test additions.
+- No new Critical/Major/Minor issues were found during this re-review.
+
+## Observation (new, non-blocking, process-only)
+
+- The identifier `QA-016` has been used twice in this report for two unrelated findings on two different changes: line 960 (`wildcard-origin-allowlist`'s task-evidence gap, still `Open`) and line 1122 (this session's `profileRouter.ts` log-accuracy fix, now `Resolved`). This is a pre-existing ID-collision in the report's own history, not introduced by this session — I did not renumber past entries, since that would rewrite the historical record this report is supposed to preserve. Flagging so the architect is aware that searching this document for "QA-016" surfaces two distinct, unrelated issues; the main agent/architect should assign the next new finding `QA-017` (the highest ID actually used anywhere in this report) to avoid a third collision.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-016 is confirmed resolved: the log now accurately distinguishes "at least one field applied" from "nothing applied," both new test assertions genuinely check the correct event, message, and structured content (not just that a log call happened), and the "at least one field applied" path's existing behavior is correctly preserved and now additionally carries `appliedFields`. Full test suites for both workspace packages pass (155/155, 65/65) and both typechecks are clean. No new issues were found. This change has no open Critical/Major/Minor issues remaining and is ready for `/verify` and, following that, `doc-writer` and `/opsx:archive`.
+
+---
