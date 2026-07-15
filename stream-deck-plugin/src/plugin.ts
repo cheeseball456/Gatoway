@@ -20,7 +20,8 @@ streamDeck.logger.setLevel("info");
 // worked (design.md D4).
 const renderStore = new RenderStore();
 
-const coreConfig = resolvePluginCoreConfig();
+const configLogger: PluginLogger = streamDeck.logger.createScope("gatoway-core-config");
+const coreConfig = resolvePluginCoreConfig(process.env, configLogger);
 
 const clientLogger: PluginLogger = streamDeck.logger.createScope("gatoway-core-client");
 const coreClient = new CoreClient({

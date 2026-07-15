@@ -220,6 +220,62 @@ per-OS default token file location), so a manually-started standalone `gatoway-c
 and this plugin agree on the token file's location with no explicit configuration in the
 common case.
 
+### Allowing browser-based (WebSocket) plugins: `allowed-origins.json`
+
+`gatoway-core` only accepts a WebSocket connection whose `Origin` header matches
+`GATOWAY_ALLOWED_ORIGINS` (see
+[`gatoway-core/README.md`'s Configuration section](../gatoway-core/README.md#configuration-environment-variables)
+and [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md)'s Origin-allowlist discussion) — empty
+by default, so no browser extension can connect until it's set. When `gatoway-core` is
+started manually from a terminal, exporting that variable directly works fine. **When
+the Stream Deck application spawns this plugin (the normal, everyday launch path — Dock,
+Finder, or Stream Deck's own autostart), the plugin's process never inherits a shell's
+exported environment variables at all** — so `GATOWAY_ALLOWED_ORIGINS` would silently
+never be set, and every WebSocket-based plugin (e.g. the xDender browser extension)
+would be unable to connect, with nothing surfacing the problem (QA-017).
+
+To fix this, the plugin reads its own local, hand-authored JSON file at startup and
+forwards its contents into the Gatoway core child's environment as
+`GATOWAY_ALLOWED_ORIGINS` — a real, persistent, GUI-launch-compatible source, instead of
+relying on an environment variable that a GUI-launched process can never receive.
+
+| | |
+|---|---|
+| Default path | `<config dir>/allowed-origins.json`, the same per-OS config directory as the auth token file |
+| Override | `GATOWAY_ALLOWED_ORIGINS_FILE` environment variable — an absolute path to the file, replacing the default entirely |
+
+Per-OS default config directory:
+
+- macOS: `~/Library/Application Support/gatoway/allowed-origins.json`
+- Windows: `%APPDATA%\gatoway\allowed-origins.json`
+- Linux/other: `$XDG_CONFIG_HOME/gatoway/allowed-origins.json` or `~/.config/gatoway/allowed-origins.json`
+
+Schema:
+
+```jsonc
+{
+  "allowedOrigins": ["moz-extension://*", "chrome-extension://<published-id>"]
+}
+```
+
+`allowedOrigins` is a required array of non-empty strings — each entry is forwarded
+as-is, comma-joined, into `GATOWAY_ALLOWED_ORIGINS`; whether an entry is treated as an
+exact match or a trailing-wildcard prefix match is `gatoway-core`'s own concern (see
+`GATOWAY_ALLOWED_ORIGINS`'s documentation above for which shape to use per browser), not
+re-validated by this file's schema.
+
+The file is read once, at plugin startup only — there is no hot-reload; a change takes
+effect on the next full restart (`streamdeck restart` after this plugin's own process
+restarts, or a manual `npm run dev`/`npm start` restart). A missing or malformed file
+never prevents the plugin from starting or from spawning Gatoway core: it falls back to
+an empty allowlist (today's fail-closed default — no WebSocket connection succeeds) and
+logs exactly why (`allowed_origins_config_missing` / `allowed_origins_config_invalid_json`
+/ `allowed_origins_config_invalid_shape` / `allowed_origins_config_loaded`), mirroring
+`docs/LAYOUT_CONFIG.md`'s `layout.json` four-case log pattern exactly.
+
+This file is unrelated to `layout.json` (position-to-capability bindings) — a separate
+file for a separate concern, connection authentication rather than what renders where.
+
 ## Development workflow
 
 ```bash
