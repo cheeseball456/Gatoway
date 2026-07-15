@@ -87,6 +87,7 @@ function connectTo(port: number): Promise<Socket> {
 class TestDoubleClient {
   readonly received: GatowayMessage[] = [];
   private readonly decoder = new NdjsonDecoder();
+  private closed = false;
 
   private constructor(private readonly socket: Socket) {
     socket.setEncoding("utf8");
@@ -94,6 +95,9 @@ class TestDoubleClient {
       for (const line of this.decoder.push(chunk)) {
         this.received.push(JSON.parse(line) as GatowayMessage);
       }
+    });
+    socket.on("close", () => {
+      this.closed = true;
     });
   }
 
@@ -113,8 +117,24 @@ class TestDoubleClient {
     return client;
   }
 
+  /**
+   * Connects without sending `register` (reconnection scenario, tasks.md 2.1): lets a
+   * test simulate a fresh connection that tries to skip straight to some other message
+   * type, which Gatoway core should reject exactly as it would any never-registered
+   * connection.
+   */
+  static async connectOnly(port: number): Promise<TestDoubleClient> {
+    const socket = await connectTo(port);
+    return new TestDoubleClient(socket);
+  }
+
   send(message: GatowayMessage): void {
     this.socket.write(encodeNdjsonLine(encodeMessage(message)));
+  }
+
+  /** Whether Gatoway core has closed this connection from its end. */
+  isClosed(): boolean {
+    return this.closed;
   }
 
   async waitForMessageType(type: string, count = 1): Promise<GatowayMessage[]> {
@@ -460,6 +480,48 @@ describe("focus tracking + profile routing (integration)", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(6);
+    });
+  });
+
+  describe("reconnection (document-plugin-reconnection)", () => {
+    it("gives a reconnecting connection no capabilities or focus until it re-registers and re-asserts focus", async () => {
+      const { port, token } = await start();
+
+      const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
+      clients.push(streamDeck);
+      await streamDeck.waitForMessageType("render_update", 3); // initial idle sweep
+
+      // First connection: registers, focuses, gets the bound sweep.
+      const original = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      original.send({ type: "focus", payload: { focused: true } });
+      await streamDeck.waitForMessageType("render_update", 6); // 3 idle + 3 bound
+
+      // Disconnects unexpectedly (e.g. a dropped socket) - focus clears, reverting to idle.
+      original.close();
+      await streamDeck.waitForMessageType("render_update", 9); // + 3 idle-revert
+
+      // Reconnects as a brand-new connection. Trying to skip straight to `focus`
+      // without a fresh `register` first must be rejected exactly like any other
+      // never-registered connection (nothing carries over from the old connection).
+      const skippedRegister = await TestDoubleClient.connectOnly(port);
+      skippedRegister.send({ type: "focus", payload: { focused: true } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(skippedRegister.isClosed()).toBe(true);
+      expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(9);
+
+      // Reconnects properly this time: fresh `register`, but no `focus` yet - still
+      // must not be treated as focused/bound just because it was previously.
+      const reconnected = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CAPABILITIES);
+      clients.push(reconnected);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(9);
+
+      // Only once it explicitly re-asserts focus does the bound sweep fire again.
+      reconnected.send({ type: "focus", payload: { focused: true } });
+      const afterReassert = await streamDeck.waitForMessageType("render_update", 12); // + 3 bound
+      expect(afterReassert.slice(9).map((m) => (m.payload as { label?: string }).label)).toEqual(
+        expect.arrayContaining(["Fixture A", "Fixture B", "Fixture Dial"]),
+      );
     });
   });
 });
