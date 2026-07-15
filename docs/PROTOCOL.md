@@ -27,7 +27,7 @@ Gatoway core exposes two listeners, both bound to IPv4 loopback (`127.0.0.1`) on
   xDender browser extension.
 
 Message-handling logic is identical across both transports — only the connection-accept
-and authentication code differs (see [Authentication](#authentication) below).
+and authentication code differs (see [Authentication and registration](#authentication-and-registration) below).
 
 ## Message envelope
 
