@@ -31,6 +31,20 @@ Gatoway core exposes two listeners, both bound to IPv4 loopback (`127.0.0.1`) on
 Message-handling logic is identical across both transports — only the connection-accept
 and authentication code differs (see [Authentication and registration](#authentication-and-registration) below).
 
+### Connecting: host and ports
+
+- **TCP** listens on `127.0.0.1:47821` by default, overridable via the `GATOWAY_TCP_PORT`
+  environment variable.
+- **WebSocket** listens on `127.0.0.1:47822` by default, overridable via the
+  `GATOWAY_WS_PORT` environment variable — connect to `ws://127.0.0.1:47822`.
+- Both env vars follow the same override pattern as Gatoway core's other `GATOWAY_*`
+  settings (e.g. `GATOWAY_TOKEN_FILE`, `GATOWAY_ALLOWED_ORIGINS`): optional, falling back
+  to the default above when unset.
+- The WebSocket listener does not inspect the upgrade request's URL path — any path on
+  the WebSocket port is accepted (`ws://127.0.0.1:47822/` and
+  `ws://127.0.0.1:47822/anything` are equally valid). Only the port and the `Origin`
+  header (see below) matter.
+
 ## Message envelope
 
 Every message, on both transports, is a single JSON object with this shape:
