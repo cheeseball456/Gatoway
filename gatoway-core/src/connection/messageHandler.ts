@@ -4,7 +4,9 @@ import {
   MessageParseError,
   type GatowayMessage,
 } from "../protocol/envelope.js";
+import { validateCapability } from "../protocol/capabilityValidation.js";
 import type {
+  Capability,
   CapabilityUpdatePayload,
   ErrorPayload,
   FocusPayload,
@@ -51,7 +53,14 @@ export function sendMessage(
   }
 }
 
-function sendError(
+/**
+ * Sends an `error` message to a connection (design.md D3): reused as-is for both
+ * envelope-level malformation (invalid JSON, non-object payload - the original use) and
+ * semantically-invalid-but-well-formed payload contents (rejected `register`
+ * capabilities/`capability_update` fields, added by `validate-capability-payloads`) -
+ * no new message type is introduced for the latter.
+ */
+export function sendError(
   connection: ConnectionRecord,
   logger: Logger,
   errorMessage: string,
@@ -63,6 +72,64 @@ function sendError(
     connectionId: connection.id,
     payload,
   });
+}
+
+export interface RejectedCapability {
+  index: number;
+  reason: string;
+}
+
+/**
+ * Resolves the `capabilities` a `register` message declares (validate-capability-
+ * payloads design.md D1/D2): an explicit array replaces the connection's previously-
+ * declared manifest (QA-003 - omission means "unchanged", never cleared), with each
+ * entry validated against the `Capability` shape independently. An entry that fails
+ * validation is dropped from the returned manifest rather than failing the whole
+ * registration; the caller reports dropped entries (index + reason) via a follow-up
+ * `error` message.
+ */
+function resolveCapabilities(
+  payload: Partial<RegisterPayload>,
+  connection: ConnectionRecord,
+): { capabilities: Capability[]; rejected: RejectedCapability[] } {
+  if (!Array.isArray(payload.capabilities)) {
+    return { capabilities: connection.capabilities ?? [], rejected: [] };
+  }
+
+  const capabilities: Capability[] = [];
+  const rejected: RejectedCapability[] = [];
+  payload.capabilities.forEach((raw, index) => {
+    const result = validateCapability(raw);
+    if (result.ok) {
+      capabilities.push(result.capability);
+    } else {
+      rejected.push({ index, reason: result.reason });
+    }
+  });
+  return { capabilities, rejected };
+}
+
+/**
+ * Sends the follow-up `error` message identifying rejected `register` capabilities
+ * (design.md D3, tasks.md 1.4): sent after `register_ack`, since the connection did
+ * authenticate/register successfully regardless - the capability issue is reported
+ * separately, not folded into `register_ack`'s own status field, which only concerns
+ * authentication. Sends nothing when every capability was valid.
+ */
+function sendRejectedCapabilitiesError(
+  connection: ConnectionRecord,
+  logger: Logger,
+  rejected: RejectedCapability[],
+): void {
+  if (rejected.length === 0) {
+    return;
+  }
+  sendError(
+    connection,
+    logger,
+    "one or more declared capabilities were invalid and have been dropped from the connection's manifest",
+    { rejectedCapabilities: rejected },
+  );
 }
 
 function sendRegisterAck(
@@ -88,10 +155,11 @@ function handleRegister(
   const payload = message.payload as Partial<RegisterPayload>;
   const pluginType = typeof payload.pluginType === "string" ? payload.pluginType : "unknown";
   // `capabilities` omitted on a register message means "unchanged", not "cleared"
-  // (QA-003): only an explicit array replaces a previously-declared manifest.
-  const capabilities = Array.isArray(payload.capabilities)
-    ? payload.capabilities
-    : (connection.capabilities ?? []);
+  // (QA-003): only an explicit array replaces a previously-declared manifest. Each
+  // entry in an explicit array is validated against the `Capability` shape (design.md
+  // D1); an invalid entry is dropped rather than failing the whole registration
+  // (design.md D2), reported afterward via a follow-up `error` message.
+  const { capabilities, rejected } = resolveCapabilities(payload, connection);
 
   // Already authenticated: this is the WebSocket path (auth already happened at
   // upgrade time via the Origin allowlist) declaring its capability manifest, or a
@@ -109,6 +177,7 @@ function handleRegister(
       "plugin registered capabilities",
     );
     sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
+    sendRejectedCapabilitiesError(connection, logger, rejected);
     router?.handleRegistered(connection);
     return;
   }
@@ -157,6 +226,7 @@ function handleRegister(
     "authentication succeeded",
   );
   sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
+  sendRejectedCapabilitiesError(connection, logger, rejected);
   router?.handleRegistered(connection);
 }
 

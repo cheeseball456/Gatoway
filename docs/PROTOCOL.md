@@ -2,7 +2,9 @@
 
 Covers the full message contract implemented as of the `focus-profile-routing` change,
 including its task-group-7 addendum (`capability_update` and the `render_update`/
-`capability_update` icon reset semantics). If you are writing a new application plugin
+`capability_update` icon reset semantics), and the `validate-capability-payloads` change
+(capability-shape validation at `register` and `capability_update`, and the follow-up
+`error` feedback it produces). If you are writing a new application plugin
 (following Lightroom or xDesign), this document should be the only thing you need to
 read to speak Gatoway's wire protocol — you should not need to read Gatoway core's
 source. Kept in sync with `gatoway-core/src/protocol/messages.ts`, the single source of
@@ -103,17 +105,26 @@ capability manifest.
   Deck plugin itself, which is the only connection Gatoway core ever sends
   `render_update` to). It is never used as, or derived from, the connection's unique
   ID — multiple simultaneous connections may share the same `pluginType`.
+- **Each `capabilities` entry is validated against the `Capability` shape below.** An
+  entry that fails validation (e.g. a missing `id`, or an unrecognized `type`) is
+  *dropped* from the connection's declared manifest — it does **not** fail the whole
+  registration. The connection still authenticates and registers successfully with
+  whatever valid capabilities remain (even if that's none of them), and Gatoway core
+  sends a follow-up [`error`](#error-either-direction) message afterward (after
+  `register_ack`) identifying which entries were rejected and why. See
+  [Capability validation errors](#capability-validation-errors) below for the exact
+  shape.
 
 #### `Capability`
 
 ```ts
 interface Capability {
-  id: string;               // stable identifier, referenced later in `command` messages
-  label: string;             // human-readable name
+  id: string;               // non-empty; stable identifier, referenced later in `command` messages
+  label: string;             // non-empty; human-readable name
   type: "button" | "dial";
-  description?: string;
-  icon?: string;
-  state?: number;            // toggle/indicator state, e.g. on/off
+  description?: string;      // string if present
+  icon?: string;              // string if present — register-time `icon` does not accept `null`
+  state?: number;             // number if present — toggle/indicator state, e.g. on/off
 }
 ```
 
@@ -149,7 +160,11 @@ A `"rejected"` status is always followed by Gatoway core closing the connection.
 A generic protocol-level error report. Gatoway core sends this to an already-
 authenticated connection that sends a malformed message (e.g. invalid JSON, or a
 payload that isn't a JSON object); a connection that hasn't authenticated yet is
-simply disconnected instead, with no `error` sent first.
+simply disconnected instead, with no `error` sent first. It is also reused, unchanged in
+shape, to report semantically-invalid-but-well-formed payload contents — specifically,
+rejected `register` capability entries and rejected `capability_update` fields (see
+[Capability validation errors](#capability-validation-errors) below) — rather than
+inventing a second message type for that purpose.
 
 ```jsonc
 {
@@ -158,6 +173,68 @@ simply disconnected instead, with no `error` sent first.
   "payload": { "message": "malformed message: …", "details": { } }
 }
 ```
+
+**Application plugins should handle unsolicited `error` messages on their own
+connection**, not just responses to something they just sent. A `register`'s rejected
+capabilities and a `capability_update`'s rejected fields are both reported this way, as a
+follow-up message rather than inline in `register_ack`/an acknowledgement — a plugin that
+only reads the message type it expects next (e.g. only ever looking for `register_ack`
+immediately after sending `register`) will silently miss this feedback entirely, exactly
+as it would have silently missed the underlying data problem before this validation
+existed. Read every message that arrives on your connection, not just the one you're
+currently waiting on.
+
+#### Capability validation errors
+
+Two situations produce a follow-up `error` message with structured `details`, always
+sent *after* whatever `register_ack` or stored update already went through — the
+connection itself was never at fault, so authentication/storage proceeds normally; only
+the specific rejected entry/field is reported separately:
+
+- **A `register` with one or more malformed `capabilities` entries** (see
+  [`Capability`](#capability) above for the shape being validated against):
+
+  ```jsonc
+  {
+    "type": "error",
+    "connectionId": "abc-123",
+    "payload": {
+      "message": "one or more declared capabilities were invalid and have been dropped from the connection's manifest",
+      "details": {
+        "rejectedCapabilities": [
+          { "index": 2, "reason": "\"id\" must be a non-empty string" }
+        ]
+      }
+    }
+  }
+  ```
+
+  `index` is the entry's position in the `capabilities` array as sent (0-based).
+  Registration still succeeds with every *other*, validly-shaped capability — even if
+  every entry was rejected, the connection registers with an empty manifest rather than
+  failing outright.
+
+- **A `capability_update` with one or more invalid `icon`/`label`/`state` fields:**
+
+  ```jsonc
+  {
+    "type": "error",
+    "connectionId": "abc-123",
+    "payload": {
+      "message": "one or more capability_update fields were invalid and were not applied",
+      "details": {
+        "rejectedFields": [
+          { "field": "state", "reason": "\"state\" must be a number" }
+        ]
+      }
+    }
+  }
+  ```
+
+  A rejected field is simply not applied — the stored capability's existing value for
+  that field is left unchanged, exactly as if the field had been omitted — while any
+  other, validly-typed field present in the same update still applies. No `error` is
+  sent when every field in the update passes validation.
 
 ## Focus tracking
 
@@ -424,6 +501,13 @@ interface CapabilityUpdatePayload {
   unchanged-if-omitted / explicit-`null`-resets-icon semantics as `render_update`'s
   `icon` field (see [Icon and label content](#icon-and-label-content) above for format
   and length guidance — it applies here too).
+- **Each present field is validated independently**: `icon` must be a string or `null`;
+  `label` must be a string; `state` must be a number. A field that fails validation is
+  simply not applied — left at its existing stored value, exactly as if it had been
+  omitted — while any other, validly-typed field in the same message still applies.
+  Gatoway core reports rejected field(s) via a follow-up
+  [`error`](#capability-validation-errors) message; see that section for the exact
+  shape.
 - **A plugin may only update capabilities it has itself declared.** Gatoway core looks
   `capabilityId` up within the *sending connection's own* registered capabilities only;
   an id that isn't among them is ignored (logged, not an error) — a plugin can never

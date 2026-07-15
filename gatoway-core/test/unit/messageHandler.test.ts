@@ -230,4 +230,104 @@ describe("handleRawMessage", () => {
 
     expect(connection.capabilities).toEqual([]);
   });
+
+  // validate-capability-payloads tasks.md 3.3: a malformed capability among otherwise
+  // valid ones is dropped, not the whole registration.
+  it("registers successfully with only the valid capabilities when one entry is malformed, and sends a follow-up error", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        capabilities: [
+          { id: "cap.one", label: "One", type: "button" },
+          { id: "", label: "Bad", type: "button" },
+        ],
+        token: "good",
+      },
+    });
+    handleRawMessage(register, connection, manager, acceptAll, logger);
+
+    expect(connection.state).toBe("authenticated");
+    expect(connection.capabilities).toEqual([{ id: "cap.one", label: "One", type: "button" }]);
+    expect(sent).toEqual([
+      { type: "register_ack", connectionId: connection.id, payload: { status: "ok", connectionId: connection.id } },
+      {
+        type: "error",
+        connectionId: connection.id,
+        payload: {
+          message: "one or more declared capabilities were invalid and have been dropped from the connection's manifest",
+          details: { rejectedCapabilities: [{ index: 1, reason: '"id" must be a non-empty string' }] },
+        },
+      },
+    ]);
+  });
+
+  // validate-capability-payloads tasks.md 3.4: every capability malformed still
+  // registers, with an empty manifest and a follow-up error naming every rejection.
+  it("registers successfully with an empty manifest when every declared capability is malformed", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        capabilities: [
+          { id: "", label: "Bad", type: "button" },
+          { id: "cap.two", label: "Two", type: "not-a-real-type" },
+        ],
+        token: "good",
+      },
+    });
+    handleRawMessage(register, connection, manager, acceptAll, logger);
+
+    expect(connection.state).toBe("authenticated");
+    expect(connection.capabilities).toEqual([]);
+    const errorMessage = sent.find((m) => (m as { type: string }).type === "error") as
+      | { payload: { details: { rejectedCapabilities: { index: number; reason: string }[] } } }
+      | undefined;
+    expect(errorMessage).toBeDefined();
+    expect(errorMessage?.payload.details.rejectedCapabilities).toEqual([
+      { index: 0, reason: '"id" must be a non-empty string' },
+      { index: 1, reason: '"type" must be exactly "button" or "dial"' },
+    ]);
+  });
+
+  it("sends no follow-up error when every declared capability is valid", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        capabilities: [{ id: "cap.one", label: "One", type: "button" }],
+        token: "good",
+      },
+    });
+    handleRawMessage(register, connection, manager, acceptAll, logger);
+
+    expect(sent.map((m) => (m as { type: string }).type)).toEqual(["register_ack"]);
+  });
 });
