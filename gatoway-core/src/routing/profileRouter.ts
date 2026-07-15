@@ -199,12 +199,14 @@ export class ProfileRouter implements ProtocolRouter {
     // while any other, validly-typed fields in the same message still apply.
     const validation = validateCapabilityUpdateFields(payload);
     const rejectedFields: { field: string; reason: string }[] = [];
+    const appliedFields: string[] = [];
 
     if (validation.icon) {
       if (validation.icon.ok) {
         // `null` is an explicit reset to "no icon" on the stored record (mirrors
         // render_update's manifest-default-reset semantics); omitted means unchanged.
         capability.icon = validation.icon.value === null ? undefined : validation.icon.value;
+        appliedFields.push("icon");
       } else {
         rejectedFields.push({ field: "icon", reason: validation.icon.reason });
       }
@@ -212,6 +214,7 @@ export class ProfileRouter implements ProtocolRouter {
     if (validation.label) {
       if (validation.label.ok) {
         capability.label = validation.label.value;
+        appliedFields.push("label");
       } else {
         rejectedFields.push({ field: "label", reason: validation.label.reason });
       }
@@ -219,6 +222,7 @@ export class ProfileRouter implements ProtocolRouter {
     if (validation.state) {
       if (validation.state.ok) {
         capability.state = validation.state.value;
+        appliedFields.push("state");
       } else {
         rejectedFields.push({ field: "state", reason: validation.state.reason });
       }
@@ -233,10 +237,23 @@ export class ProfileRouter implements ProtocolRouter {
       );
     }
 
-    this.logger.info(
-      { event: "capability_updated", connectionId: connection.id, capabilityId },
-      "applied live capability_update to stored capability record",
-    );
+    // QA-016 fix: this log line predates per-field validation and used to be
+    // unconditionally accurate (every present field was always applied). Now that a
+    // field can be rejected, only claim something was "applied" when at least one field
+    // actually was - if every present field failed validation (or none were present),
+    // log a distinct, accurate event instead of falsely claiming the stored record
+    // changed.
+    if (appliedFields.length > 0) {
+      this.logger.info(
+        { event: "capability_updated", connectionId: connection.id, capabilityId, appliedFields },
+        "applied live capability_update to stored capability record",
+      );
+    } else {
+      this.logger.info(
+        { event: "capability_update_not_applied", connectionId: connection.id, capabilityId, rejectedFields },
+        "capability_update applied no fields to stored capability record",
+      );
+    }
 
     if (this.focusTracker.current !== connection.id) {
       // Stored, but this connection's layout isn't currently displayed (profile-routing

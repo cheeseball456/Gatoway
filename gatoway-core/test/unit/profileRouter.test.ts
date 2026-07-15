@@ -528,6 +528,11 @@ describe("ProfileRouter", () => {
           },
         },
       ]);
+      // QA-016: at least one field (label) was actually applied, so the log should say so.
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "capability_updated", appliedFields: ["label"] }),
+        "applied live capability_update to stored capability record",
+      );
     });
 
     it("applies no changes and reports every field when all fields in the update are invalid", () => {
@@ -558,6 +563,25 @@ describe("ProfileRouter", () => {
         "label",
         "state",
       ]);
+      // QA-016: nothing was actually applied, so the log must not claim otherwise - it
+      // should log a distinct, accurate "not applied" event instead of the "applied" one.
+      expect(logger.info).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: "capability_updated" }),
+        expect.anything(),
+      );
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "capability_update_not_applied",
+          connectionId: app.id,
+          capabilityId: "cap.one",
+          rejectedFields: [
+            { field: "icon", reason: '"icon" must be a string or null' },
+            { field: "label", reason: '"label" must be a string' },
+            { field: "state", reason: '"state" must be a number' },
+          ],
+        }),
+        "capability_update applied no fields to stored capability record",
+      );
     });
 
     it("sends no error when every field in the update is valid", () => {
