@@ -1087,3 +1087,100 @@ Full suite: 129/129 `gatoway-core` tests pass (`npm test`), `tsc --noEmit` clean
 ## Review Verdict
 
 **Recommendation:** ✅ **Pass** — No Critical, Major, or Minor issues found. This is a genuine documentation- and spec-completeness-only change: the full diff touches only `docs/PROTOCOL.md` and one integration test file (plus the OpenSpec change artifacts), with zero changes under `gatoway-core/src/` or `stream-deck-plugin/`. Both new spec scenarios (message-protocol's "Reconnecting plugin must register again," focus-tracking's "Reconnecting plugin must re-assert focus") were verified directly against the real implementation, not merely trusted, and both are accurate. The new integration test is a genuine disconnect-then-reconnect exercise against real sockets on a real running server, not two independent connections coincidentally resembling one. `docs/PROTOCOL.md`'s new "Reconnection" section and all three of its cross-links resolve to real, correct headings. The full test suite (129/129) passes and the typecheck is clean. One non-blocking Observation (a requirements-level ambiguity in FR-006's "reconnect" logging wording, pre-existing and out of scope here) is noted for the architect's awareness only. This change is ready for `/verify` and, following that, `doc-writer` and `/opsx:archive`.
+
+---
+---
+
+# Static Review Session — 2026-07-15 — `validate-capability-payloads`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `validate-capability-payloads` (branch `validate-capability-payloads`, HEAD `c242782`) — capability-shape validation added at two points: `register`'s `capabilities` array (`gatoway-core/src/protocol/capabilityValidation.ts` new, `messageHandler.ts`'s `resolveCapabilities`/`handleRegister`) and `capability_update`'s `icon`/`label`/`state` fields (`profileRouter.ts`'s `handleCapabilityUpdate`). Reviewed against `proposal.md`, `design.md` (D1–D4), the two delta specs (`message-protocol`, `profile-routing`), `tasks.md`, `docs/PROTOCOL.md`'s diff, `REQUIREMENTS.md`, and `ARCHITECTURE.md`. I did not rely on the developer's claims alone: I ran the full test suite for both packages, read every touched line of source and test code, and — per this session's specific ask to verify partial-acceptance and message-ordering behavior with actual execution rather than static reasoning alone — wrote and ran a temporary, throwaway script (`gatoway-core/test/manual/qaOrderCheck.ts`, not committed, deleted before finishing this session) against a real, running `ConnectionManager`/`ProfileRouter`/TCP listener to inspect the literal byte-level order of messages received over a real socket, mirroring the same temporary-verification-script practice used in the `focus-profile-routing` review (QA-010) earlier in this project's history.
+
+---
+
+## Summary
+
+This is a clean, well-scoped, and correctly-implemented change. Every specific area this session was asked to scrutinize checks out:
+
+- **Partial acceptance is genuinely implemented, not just claimed.** For `register`, `resolveCapabilities` (`messageHandler.ts:91-110`) validates each array entry independently via `forEach((raw, index) => ...)` with no early return and no shared mutable state between iterations — one malformed entry cannot affect whether a different, unrelated entry is accepted. I confirmed this both by reading the code and via the existing unit/integration tests, which exercise two malformed entries with *different* rejection reasons in the same array and confirm both are reported independently while the registration as a whole still succeeds. Same for `capability_update`: `validateCapabilityUpdateFields` (`capabilityValidation.ts:76-104`) checks `icon`/`label`/`state` in three independent `if` blocks with no shared state, and `handleCapabilityUpdate` applies each field's validated value directly to the stored `Capability` object regardless of whether a sibling field was rejected. A committed unit test (`profileRouter.test.ts` "applies only the valid fields...") proves a valid `label` is applied to the live, stored record while an invalid `state` in the *same message* is rejected and left unchanged — genuine partial acceptance at the field level, not merely a mocked assertion.
+- **The `register_ack`-before-`error` ordering is real, not just asserted in prose.** `messageHandler.test.ts`'s existing unit test asserts `sent` (the literal, ordered sequence of `connection.send()` calls) via `toEqual` with `register_ack` listed before `error` — a genuine ordered-array assertion, not just "both messages eventually arrive." I went further and confirmed this at the actual wire level: my temporary script registered a connection with one malformed capability against a real, running TCP listener and captured the literal byte order the client received: `["register_ack", "error"]`, with the `error` payload's `rejectedCapabilities` correctly identifying the bad entry. Both `handleRegister` code paths (the TCP credential-validating branch, `messageHandler.ts:206-230`, and the already-authenticated/WebSocket branch, `messageHandler.ts:167-182`) call `sendRegisterAck` immediately before `sendRejectedCapabilitiesError`, synchronously with no `await` between them, so the ordering holds for both transports by construction, not by accident.
+- **The register-vs-capability_update `icon`/`null` asymmetry is implemented exactly backwards from how it would be easy to get wrong — i.e., correctly.** `validateCapability` (register-time) accepts only `typeof value.icon === "string"` and explicitly rejects `icon: null` (there's a dedicated, clearly-commented unit test for this: "rejects icon: null at register time (unlike capability_update's three-way semantics)"). `validateCapabilityUpdateFields` accepts `payload.icon === null || typeof payload.icon === "string"`. This is exactly the distinction `design.md` D1 calls for, and it is the one place in this change most likely to be silently swapped by mistake — it isn't.
+- **Validation is fully independent per-entry/per-field**, confirmed by both code inspection (no shared state, no short-circuiting between entries/fields) and by tests exercising mixed valid/invalid combinations in a single message.
+- **The `error` payload's `details` shape is populated correctly and usefully** — `rejectedCapabilities: { index, reason }[]` and `rejectedFields: { field, reason }[]` are both populated with specific, human-readable reasons (e.g. `"id" must be a non-empty string`, `"state" must be a number`) rather than a generic message, and `index`/`field` correctly identify exactly which entry/field is at fault. Verified directly against real error payloads produced by both the test suite and my live script.
+- **`docs/PROTOCOL.md` is accurate against the implemented behavior.** The new "Capability validation errors" section's example payloads, message text, and field descriptions match the actual code strings exactly (I compared them character-for-character against `messageHandler.ts`/`profileRouter.ts`'s literal error message strings), the register-vs-`capability_update` `icon`/`null` distinction is called out explicitly and correctly, and the new heading anchors (`#error-either-direction`, `#capability-validation-errors`) resolve to real headings in the file. This also closes part of the still-open QA-011 gap from `focus-profile-routing` (this document's ongoing accuracy), though QA-011 itself (the pre-existing `capability_update` doc gap from before this change) is a separate, already-tracked item — not re-litigated here.
+
+One Minor, code-level finding did surface, in an area not explicitly called out in this session's scope but adjacent to it: `profileRouter.ts`'s pre-existing `capability_updated` log line is unconditional and was not updated to account for the new possibility that *every* field in a `capability_update` was rejected and nothing was actually applied — the log still unconditionally states "applied live capability_update to stored capability record" even when the stored record was left completely untouched. See QA-016.
+
+Full test suite: `gatoway-core` 155/155 passing (up from 129 before this change), `stream-deck-plugin` 65/65 passing (unaffected, no files touched — confirmed via `git diff --stat`), both packages' `tsc --noEmit` clean.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-016 | Minor | `gatoway-core/src/routing/profileRouter.ts:236-239` | The `capability_updated` log event unconditionally logs "applied live capability_update to stored capability record" even in the case where every field in the update was rejected and nothing was actually applied. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved in review` — fixed or clarified during the review conversation
+- `Deferred` — acknowledged, decision made to address in a later cycle
+
+---
+
+## Issue Detail
+
+### QA-016 · Minor · `gatoway-core/src/routing/profileRouter.ts:236-239`
+
+**What:** `handleCapabilityUpdate`'s pre-existing `logger.info` call —
+```ts
+this.logger.info(
+  { event: "capability_updated", connectionId: connection.id, capabilityId },
+  "applied live capability_update to stored capability record",
+);
+```
+fires unconditionally after the per-field validation loop, regardless of whether any field actually passed validation. This log line predates this change (it existed, accurately, when every field was always accepted with no validation at all); this change added the ability for validation to reject some or all fields, but did not revisit this log statement to account for that new possibility.
+
+**Scenario:** A `capability_update` message where every present field (`icon`/`label`/`state`) fails validation — exactly the profile-routing spec's own "All fields invalid, nothing applied" scenario, which this change's own test suite exercises (`profileRouter.test.ts` "applies no changes and reports every field when all fields in the update are invalid").
+
+**Evidence:** I traced that exact test: `manager.get(app.id)?.capabilities` is asserted to equal the original, completely unchanged capability, and the only message sent is the `error` — yet the code path that runs immediately after building `rejectedFields` unconditionally logs `event: "capability_updated"` with message text "applied... to stored capability record." No test in the suite asserts on this log call's content (all existing assertions target the `sent` array and `manager.get(...)`, never the logger), so this specific inaccuracy is invisible to the automated suite, mirroring exactly the kind of gap `gatoway-core-foundation`'s QA-001 and `stream-deck-plugin-skeleton`'s QA-007 previously found in this project — a log statement that no longer accurately reflects what happened once a new code path (validation/rejection) was added nearby.
+
+**Impact:** Low severity — this is purely an observability/log-accuracy gap, not a functional defect; the actual applied/rejected field behavior is correct and separately, accurately reported via the `error` message's `rejectedFields`. But it works directly against this change's own stated purpose (giving plugin authors and whoever debugs Gatoway core's logs an accurate trail of what happened) and against `REQUIREMENTS.md` FR-006/NFR 3.6's intent for detailed, trustworthy logs: someone reading the log in isolation (without cross-referencing the `error` message) would be told an update was "applied" in the one case where it definitely was not.
+
+**Suggested fix direction:** The outcome needed is that this log line (or a differently-worded one) accurately reflects whether anything was actually applied — e.g. only logging `capability_updated` when at least one field was actually applied, or including which fields were applied/rejected in the log's own structured fields rather than a fixed human-readable message that assumes success. Not prescribing the exact wording or condition.
+
+**Root-cause level:** Code. Neither `design.md` nor either delta spec makes any claim about this specific log line's content — this is an implementation detail that fell out of sync with the new validation behavior added right next to it, not a design or requirements gap.
+
+---
+
+## Areas Specifically Verified (per review scope)
+
+- **Partial acceptance, register (`capabilities` array):** Confirmed via code inspection (`resolveCapabilities`'s independent `forEach`) and via both `messageHandler.test.ts` and `focusProfileRouting.integration.test.ts` tests exercising a malformed entry alongside otherwise-valid ones, and every-entry-malformed. One integration test goes further than checking the `error` payload alone: it continues the scenario end-to-end (focuses the connection, sends a real `input_event` over a second real socket, and confirms the resolved `command` arrives correctly for a capability that *was* validly registered alongside the dropped one) — genuine proof the registration is fully functional afterward, not merely accepted in name.
+- **Partial acceptance, `capability_update` fields:** Confirmed via `profileRouter.test.ts`'s three dedicated tests (mixed valid+invalid, all-invalid, all-valid) and the integration test, all asserting directly against the live, stored `Capability` object's actual field values after the update — not merely that "no exception was thrown."
+- **`register_ack`-before-`error` ordering (design.md D3):** Confirmed via the existing ordered-array unit test assertion and via a live, temporary script against a real TCP socket (see Summary). Order holds for both the TCP-credential-validating path and the already-authenticated/WebSocket path, since both call the same two `sendMessage`-wrapping functions synchronously back-to-back with nothing that could reorder them (`ws.send`/`socket.write` both preserve call order for a single connection).
+- **Register-time `icon: null` rejection vs. `capability_update`'s `icon: null` acceptance:** Confirmed by direct reading of `capabilityValidation.ts`'s two validation functions (see Summary) and by a dedicated, explicitly-commented unit test for the register-time rejection case. This is the one place in this change most at risk of an easy off-by-one-concept mistake, and it is implemented correctly.
+- **Per-entry/per-field independence:** Confirmed no shared mutable state or early-return-on-first-failure exists in either validation function or either call site; multiple simultaneous rejections (different indices/fields, different reasons) are each reported correctly and independently, per both the existing tests and my own live script.
+- **`error` payload `details` shape and usefulness:** Confirmed populated with specific, actionable `reason` strings (never a generic "invalid" or an empty object) and correct `index`/`field` identifiers, both via the test suite and my own live-captured payloads.
+- **`docs/PROTOCOL.md` accuracy:** Confirmed the new "Capability validation errors" section's example JSON, message strings, and field descriptions match the actual implementation character-for-character, and that both new heading anchors used elsewhere in the diff resolve to real headings.
+- **Backward compatibility (task 1.5, 3.6):** Confirmed the pre-existing "omission means unchanged, explicit array replaces" re-registration semantics (QA-003, from `gatoway-core-foundation`) are untouched by this change when the explicit array is fully valid — the relevant pre-existing tests (`messageHandler.test.ts` "preserves previously-declared capabilities...", "replaces capabilities...") still pass unchanged, and the full suite shows no regressions elsewhere (155/155 `gatoway-core`, 65/65 `stream-deck-plugin`, both typechecks clean).
+
+---
+
+## Observations
+
+- The `error` message's `ErrorPayload.details` field remains typed as `unknown` (pre-existing, from `gatoway-core-foundation`) rather than a discriminated union covering the new `{ rejectedCapabilities }`/`{ rejectedFields }` shapes this change introduces. This is consistent with the pre-existing, intentionally generic `error` message design (D3: "no new message type"), and both new call sites construct `details` correctly by hand — not a defect, just a spot where a future reader of `messages.ts` alone (without `docs/PROTOCOL.md`) wouldn't discover these two `details` shapes from the type system.
+- `handleCapabilityUpdate` re-renders the bound Stream Deck position even in the case where every field in the `capability_update` was rejected and nothing changed (the capability's `label`/`icon`/`state` are resent to the display unchanged). This is harmless — it's a full, idempotent restatement of current display state, consistent with how this same code path already behaves for a genuinely valid but no-op update — but combined with QA-016's log-accuracy gap, it means the *only* correct signal that "nothing was actually applied" is the separate `error` message, not the log or the fact that a render was sent.
+
+---
+
+## Testing Coverage Assessment
+
+Both new validation functions have thorough, well-targeted unit tests (`capabilityValidation.test.ts`) covering every documented rule (non-empty `id`/`label`, exact `type` enum, wrong-typed `description`/`icon`/`state`, and the register-vs-`capability_update` `icon`/`null` asymmetry specifically). `messageHandler.test.ts` and `profileRouter.test.ts` each add targeted tests for the mixed-valid/invalid, all-invalid, and all-valid cases at the handler level, asserting against the live stored state and the literal `sent` message sequence (including order, for the register case). The integration suite adds two real-socket tests that carry a malformed-capability registration through to a real, resolved `input_event`/`command` round-trip, which is stronger evidence than a unit test alone that partial acceptance doesn't just "look right" but functions correctly end-to-end. No test in the suite exercises QA-016 directly since it's a log-content assertion, matching the pattern noted in the finding itself.
+
+Manual/live verification (real TCP wire order, real error payload contents) was performed directly in this static session via a temporary, deleted script, in addition to the automated suite — appropriate given this session's specific ask to verify (not just read) the ordering and partial-acceptance claims.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ⚠️ **Conditional pass** — No Critical or Major issues. Every area this session was specifically asked to scrutinize — genuine partial acceptance at both the capability-array and field level, `register_ack`-before-`error` ordering (confirmed live, not just asserted), the register-vs-`capability_update` `icon`/`null` asymmetry, per-entry/per-field independence, and the `error` payload's `details` shape — is implemented correctly and is well-tested. One Minor, code-level finding (QA-016: a pre-existing log line not updated to account for the new "nothing was applied" case) is open but non-blocking; the architect/developer may fix it now or defer it. This change is ready for `/verify` once QA-016 is triaged.
