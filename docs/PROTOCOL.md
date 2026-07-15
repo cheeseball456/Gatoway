@@ -27,7 +27,7 @@ Gatoway core exposes two listeners, both bound to IPv4 loopback (`127.0.0.1`) on
   xDender browser extension.
 
 Message-handling logic is identical across both transports — only the connection-accept
-and authentication code differs (see [Authentication](#authentication) below).
+and authentication code differs (see [Authentication and registration](#authentication-and-registration) below).
 
 ## Message envelope
 
@@ -93,7 +93,11 @@ capability manifest.
 - Sending `register` again on an already-authenticated connection re-declares its
   capability manifest without repeating the credential check. Omitting `capabilities`
   on a re-registration leaves the previously-declared manifest unchanged; an explicit
-  array (including `[]`) always replaces it.
+  array (including `[]`) always replaces it. This is distinct from **reconnecting** —
+  a brand-new connection opened after a prior one disconnected. A new connection always
+  starts from nothing (no capabilities, no `pluginType`) regardless of what any
+  previous, now-disconnected connection had declared, so it must send a full `register`
+  of its own — see [Reconnection](#reconnection) below.
 - `pluginType` is a free-form string identifying the *kind* of plugin (e.g.
   `"lightroom"`, `"xdesign"`, `"stream-deck"` — the last one reserved for the Stream
   Deck plugin itself, which is the only connection Gatoway core ever sends
@@ -181,6 +185,43 @@ Gatoway core tracks **at most one** focused connection at a time:
 
 Application plugins should send `focus` promptly on every focus change; there is no
 polling or periodic re-assertion — Gatoway core's state is purely event-driven.
+
+Because a disconnect always clears focus, a plugin that reconnects while still
+active/focused is **not** automatically treated as focused again on its new connection
+— it must re-send `focus: true`. See [Reconnection](#reconnection) below.
+
+## Reconnection
+
+A dropped connection and the fresh connection that replaces it are unrelated as far as
+the wire protocol is concerned. Gatoway core assigns every accepted connection its own
+new connection ID and keeps no state — registered capabilities, `pluginType`, focus —
+beyond that connection's own lifetime; once a connection disconnects, its record is
+discarded outright (see [Authentication and registration](#authentication-and-registration)
+and [Focus tracking](#focus-tracking) above). There is no session/resume mechanism,
+reconnect token, or grace period tied to "the same" logical plugin reconnecting — Gatoway
+core has no notion of that at all, only of connections coming and going. Concretely,
+this means a plugin author reconnecting (e.g. after a dropped socket, a crash, or a
+browser Manifest V3 background service worker being torn down and restarted) must:
+
+- **Send a fresh `register`.** The new connection has no capability manifest until it
+  does — nothing from the prior, now-disconnected connection carries over, even if that
+  connection was registered moments earlier. Until `register` is sent, the connection is
+  also unauthenticated and cannot send any other message type (it is simply disconnected
+  if it tries).
+- **Re-send `focus: true` if still active.** Focus is never restored automatically on
+  reconnection, because a disconnect always clears focus first — by the time the new
+  connection registers, Gatoway core has already forgotten it was ever focused. A plugin
+  that is still the foreground/active one when it reconnects must report that
+  explicitly; there is no way for Gatoway core to infer it.
+
+No special handshake is needed for either step, precisely because Gatoway core already
+tolerates a plugin disconnecting and reconnecting at any time. A plugin doesn't
+negotiate resumption or wait out a grace period — it just connects, authenticates, and
+sends a fresh `register` (and `focus: true`, if applicable) exactly as it would on its
+very first connection. This matters most for a plugin whose connection is expected to
+drop and reconnect often — a Manifest V3 browser extension's background service worker
+being the prime example — since it means reconnect handling is just "repeat the normal
+startup sequence," not separate logic to write and maintain.
 
 ## Position-addressed input and rendering (Stream Deck ↔ core)
 
