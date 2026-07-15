@@ -1,7 +1,7 @@
 # Requirements: Gatoway
 
-**Version:** 1.1
-**Date:** 2026-07-13
+**Version:** 1.2
+**Date:** 2026-07-16
 **Status:** Draft — pending architect review
 
 ---
@@ -32,12 +32,14 @@ No hard deadline or budget constraint. Development and testing will use an Elgat
 - Support for Stream Deck+ dials/touch sliders (continuous input), not just button presses
 - Cross-platform Gatoway core (Windows, Mac, Linux)
 - Detailed logging for debugging/troubleshooting
+- Extension-managed on-device layout: each application plugin decides what to display on its available button/dial slots, using capacity information Gatoway provides — not a host-side, hand-authored mapping file (see FR-007/FR-008; resolves what was Open Question #1 in v1.1)
 
 **Out of scope (for now):**
-- A no-code configuration/mapping UI for non-developer End Users (deferred to a future release)
+- A no-code configuration/mapping UI for non-developer End Users (deferred to a future release; its likely scope has shrunk now that plugins no longer need a hand-authored id-to-position mapping to begin with — see Section 2.3)
 - Multi-instance support for a single application running more than once at a time (not precluded architecturally, but not a near-term requirement)
 - Remote/networked operation beyond a single local machine
 - A Linux-native Stream Deck hardware experience (deferred — Elgato's own Stream Deck software has no Linux build at all; supporting Linux here would require either an alternative integration path or custom-written software, neither of which is designed or scoped yet)
+- Multiple simultaneous physical Stream Deck devices, or a Stream Deck device being connected/disconnected while plugins remain connected (not a near-term requirement; not precluded architecturally — this is part of why capacity information is refreshed on every focus change rather than only once at connection, see FR-007)
 
 ---
 
@@ -52,11 +54,11 @@ No hard deadline or budget constraint. Development and testing will use an Elgat
 ### 2.2 Core Features (MVP)
 
 #### FR-001 Bidirectional Communication
-**Description:** Gatoway's core supports two-way messaging: the Stream Deck can send commands to trigger actions in a connected application, and the application can push state updates back to update button icons, labels, toggle states, and dial values.
+**Description:** Gatoway's core supports two-way messaging: the Stream Deck can send commands to trigger actions in a connected application, and the application can push content updates back to update a slot's icon, label, or state.
 **User story:** As a developer, I want commands and state updates to flow in both directions so that the Stream Deck accurately reflects the current state of the application it's controlling.
 **Acceptance criteria:**
 - [ ] A button press on the Stream Deck can trigger a command in a connected application
-- [ ] An application can push a state update that changes a button's icon, label, or toggle state
+- [ ] An application can push a content update that changes a slot's icon, label, or state
 - [ ] A dial/slider turn on the Stream Deck+ can send a continuous/parameterized value to a connected application
 
 #### FR-002 Simultaneous Multi-Application Connections
@@ -74,10 +76,10 @@ No hard deadline or budget constraint. Development and testing will use an Elgat
 - [ ] A browser-based extension plugin (e.g. xDender for xDesign) can signal to Gatoway when it gains or loses focus
 
 #### FR-004 Automatic Profile Switching
-**Description:** When an application plugin reports that it has gained focus, Gatoway switches the Stream Deck to display that application's configured profile. When no supported application currently has focus, the Stream Deck falls back to a default idle profile.
+**Description:** When an application plugin reports that it has gained focus, Gatoway switches the Stream Deck to display that application's current content. When no supported application currently has focus, the Stream Deck falls back to a default idle profile.
 **User story:** As a user, I want the Stream Deck to automatically show the right set of controls for whichever application I'm currently using, so I don't have to switch profiles manually.
 **Acceptance criteria:**
-- [ ] Focus signal from an application plugin triggers a switch to that application's profile on the Stream Deck
+- [ ] Focus signal from an application plugin triggers a switch to that application's current content on the Stream Deck
 - [ ] When no connected application reports focus, the Stream Deck shows a default idle profile
 
 #### FR-005 Dial/Slider Support
@@ -95,21 +97,38 @@ No hard deadline or budget constraint. Development and testing will use an Elgat
 - [ ] Gatoway logs commands and state updates passing through the core
 - [ ] Logs are retained on a short-term/rotating basis for troubleshooting, not long-term archival
 
+#### FR-007 Extension-Provided Capacity and Slot-Based Content
+**Description:** Gatoway tells each connecting application plugin how many physical button slots and dial slots are currently available on the connected Stream Deck (based on what the user has actually placed on the device), both when the plugin first connects and again every time it gains focus. The plugin uses this information to decide exactly what to display, sized to fit — Gatoway itself does not need to understand what a plugin's commands mean; it only needs to know what to display at each slot, and which slot was just interacted with. This replaces any host-side, hand-authored file mapping a plugin's commands to physical positions, which required knowing a plugin's internal command identifiers in advance — impractical for anyone other than that plugin's own author.
+**User story:** As a developer, I want Gatoway to tell my plugin how many buttons and dials it actually has to work with, so my plugin can decide what to show without anyone needing to hand-configure a mapping between my plugin's commands and specific physical positions.
+**Acceptance criteria:**
+- [ ] A newly-connected application plugin receives the number of available button slots and dial slots
+- [ ] A plugin receives refreshed slot counts again each time it reports gaining focus
+- [ ] Gatoway displays whatever ordered content a plugin currently provides by filling available slots directly, without needing to know what that content represents
+- [ ] No separate, hand-authored file is required to map a plugin's commands to physical positions
+
+#### FR-008 Extension-Managed Paging and Grouping
+**Description:** An application plugin with more commands than fit on the slots available to it, or with commands that are logically grouped (e.g. several variants of one tool), manages that paging or grouping entirely itself, deciding what to currently display given the slot counts Gatoway provided. Gatoway does not need to understand any such structure — it only ever sees the plugin's current, right-sized list of what to show. This mirrors how the existing Lightroom Stream Deck Plugin already manages its own internal panel/page state today.
+**User story:** As a developer, I want my plugin to handle its own paging and grouping of commands, so that Gatoway can remain a simple, application-agnostic relay no matter how many commands my plugin has.
+**Acceptance criteria:**
+- [ ] A plugin with more commands than available slots can show a subset at a time and let the user navigate to see more, without Gatoway being aware this is happening
+- [ ] A plugin can group related commands together and reveal them progressively, without Gatoway needing to know about the grouping
+
 ### 2.3 Future Features (Post-MVP)
-- **No-code mapping/configuration UI:** A UI allowing a non-developer End User to install app plugins and configure Stream Deck button-to-command mappings without writing code. Deferred because the immediate need is developer-driven (project owner writes plugin code directly); this becomes necessary if Gatoway is shared publicly.
+- **No-code mapping/configuration UI:** A UI allowing a non-developer End User to install app plugins and configure Stream Deck button-to-command mappings without writing code. Deferred because the immediate need is developer-driven (project owner writes plugin code directly); this becomes necessary if Gatoway is shared publicly. Its likely shape has changed following FR-007/FR-008: since plugins no longer need a hand-authored id-to-position mapping to work at all, any future UI here would most likely be about letting a user *override* a plugin's own default ordering, rather than creating a mapping from scratch.
 - **Multi-instance support:** Support for multiple simultaneous instances of the same application (e.g. two Lightroom windows). Not needed for the currently targeted applications (Lightroom, xDesign), but the architecture should not preclude it for future applications.
+- **Multiple physical Stream Deck devices:** Support for more than one physical Stream Deck connected at once, and devices being connected/disconnected while plugins remain connected. Not needed near-term, but the decision to refresh slot-capacity information on every focus change (FR-007) was deliberately made so this isn't precluded later.
 
 ### 2.4 User Journeys
 
 #### Journey 1: Switching focus between applications
-1. User is working in Lightroom; the Stream Deck shows the Lightroom profile (buttons/dials mapped to Lightroom actions).
+1. User is working in Lightroom; the Stream Deck shows Lightroom's current content (buttons/dials showing Lightroom actions).
 2. User switches focus to a browser tab running xDesign.
 3. The xDesign browser extension (xDender) detects the focus change and signals Gatoway.
-4. Gatoway switches the Stream Deck to the xDesign profile.
+4. Gatoway sends xDender its currently-available slot counts, and xDender responds with its content sized to fit; Gatoway switches the Stream Deck to display it.
 5. If the user switches focus away from both Lightroom and xDesign (e.g. to Finder), the Stream Deck falls back to the default idle profile.
 
 ### 2.5 Data Requirements
-Gatoway's core concern is real-time message passing (commands and state updates) between the Stream Deck and connected application plugins, plus activity logs for debugging. Whether persistent configuration (e.g. profile-to-application mappings) is owned by Gatoway's core or supplied by each application plugin is an open design question — see Section 4.2.
+Gatoway's core concern is real-time message passing (commands and content updates) between the Stream Deck and connected application plugins, plus activity logs for debugging. Persistent, host-side configuration of button-to-command mappings is no longer needed: each application plugin decides what to display on its available slots, live, based on the slot-capacity information Gatoway provides at connection time and on every focus change (see FR-007/FR-008; this resolves what was Open Question #1 in v1.1 — the answer is that this is supplied by each plugin, not owned by Gatoway's core).
 
 ### 2.6 Integrations
 | System | Direction | Purpose |
@@ -158,11 +177,12 @@ English only; no other languages or locales required at this time.
 - Lightroom Classic and Solidworks xDesign (via xDender) are the two applications used to validate that the core is genuinely application-agnostic.
 - Multiple simultaneous instances of the same application are not required for Lightroom or xDesign, but the architecture should not architecturally preclude this for future applications.
 - The Stream Deck+ is the hardware baseline for development and testing.
+- A single physical Stream Deck device is assumed for now; the design should not preclude multiple devices later (see Section 2.3).
 
 ### 4.2 Open Questions
 | # | Question | Owner | Due |
 |---|----------|-------|-----|
-| 1 | Should persistent configuration (e.g. profile-to-application mappings) be owned by Gatoway's core, or supplied by each application plugin when it connects? | Architect | Before/during architecture design |
+| 1 | ~~Should persistent configuration (e.g. profile-to-application mappings) be owned by Gatoway's core, or supplied by each application plugin when it connects?~~ **Resolved 2026-07-16:** supplied live by each application plugin, using slot-capacity information Gatoway provides — see FR-007/FR-008. | Architect | Resolved |
 | 2 | What is the specific authentication/access-control mechanism for the local WebSocket channel? | Architect | Before/during architecture design |
 | 3 | What does the configuration backup/recovery approach look like? | Architect / Developer | Before/during architecture design |
 | 4 | What does the End User (non-developer) mapping/configuration UI look like? | To be defined | Post-MVP |
@@ -176,7 +196,8 @@ English only; no other languages or locales required at this time.
 |------|------------|
 | Gatoway | The application-agnostic communications core connecting the Stream Deck to application plugins |
 | Plugin | Application-specific code that connects to Gatoway and speaks its protocol (e.g. the Lightroom plugin, the xDender browser extension) |
-| Profile | The set of button/dial mappings shown on the Stream Deck for a specific application |
+| Slot | A single physical button or dial position on the Stream Deck. Gatoway addresses slots by position only — it has no knowledge of what a plugin's content at a given slot actually does |
+| Profile | The set of button/dial content shown on the Stream Deck for a specific application |
 | Idle profile | The default Stream Deck profile shown when no connected application currently has focus |
 | Focus (application) | The state of being the currently active/foregrounded application, as self-reported by that application's plugin |
 | Stream Deck+ | The Elgato Stream Deck hardware model used for development and testing, which includes touch dials in addition to buttons |
