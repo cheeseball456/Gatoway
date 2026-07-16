@@ -1,32 +1,31 @@
 ## MODIFIED Requirements
 
 ### Requirement: Input Event Resolution Against the Focused Connection
-Gatoway core SHALL resolve an incoming `input_event`'s physical position to an
-ordinal index within the most recent `device_capacity` report for the matching
-controller type, then check whether the currently focused connection's own declared
-content (`content.buttons`/`content.dials`) has an entry at that index. If so, Gatoway
-core SHALL forward a `command` naming that ordinal index to the focused connection.
-Gatoway core SHALL NOT consult any persisted, host-side mapping — resolution depends
-only on live `device_capacity` and the focused connection's own, currently-declared
-content.
+Gatoway core SHALL resolve an incoming `input_event`'s physical position to its fixed
+label within the most recent `device_capacity` report for the matching controller
+type, then check whether the currently focused connection's own declared content has
+an entry for that label. If so, Gatoway core SHALL forward a `command` naming that
+label to the focused connection. Gatoway core SHALL NOT consult any persisted,
+host-side mapping — resolution depends only on live `device_capacity` and the
+focused connection's own, currently-declared content.
 
 #### Scenario: Input event resolved to a declared content entry
-- **WHEN** a connection is focused and its own declared content has an entry at the ordinal index corresponding to the position reported in an `input_event`
-- **THEN** Gatoway core sends a `command` for that ordinal index to the focused connection
+- **WHEN** a connection is focused and its own declared content has an entry for the label corresponding to the position reported in an `input_event`
+- **THEN** Gatoway core sends a `command` naming that label to the focused connection
 
 ### Requirement: Input Events Are Safely Ignored When Unresolvable
 Gatoway core SHALL NOT error or crash when an `input_event` cannot be resolved —
 whether because no connection is currently focused, because the reported position
 isn't present in the most recent `device_capacity` report, or because the focused
-connection's own declared content has no entry at the corresponding ordinal index
-(e.g. it declared fewer entries than the physical capacity available).
+connection's own declared content has no entry for the corresponding label (e.g. it
+did not declare content for every physically available label).
 
 #### Scenario: No connection is focused
 - **WHEN** an `input_event` is received while no connection is focused
 - **THEN** Gatoway core takes no action beyond logging the event; nothing is sent to any connection
 
-#### Scenario: Focused connection's content is shorter than physical capacity
-- **WHEN** an `input_event` is received for a physical position whose ordinal index has no corresponding entry in the focused connection's declared content
+#### Scenario: Focused connection's content omits the corresponding label
+- **WHEN** an `input_event` is received for a physical position whose label has no corresponding entry in the focused connection's declared content
 - **THEN** Gatoway core takes no action beyond logging the event; nothing is sent to any connection
 
 #### Scenario: Reported position is not part of the current device capacity
@@ -36,9 +35,9 @@ connection's own declared content has no entry at the corresponding ordinal inde
 ### Requirement: Render Updates Reflect Focus Changes
 Gatoway core SHALL send `render_update` messages to the Stream Deck plugin reflecting
 the currently focused connection's declared content whenever focus changes, mapping
-each declared entry's ordinal index to its corresponding physical position via the
-most recent `device_capacity` report, and SHALL send `render_update` messages
-reflecting a built-in idle appearance whenever no connection is focused.
+each declared entry's label to its corresponding physical position via the most
+recent `device_capacity` report, and SHALL send `render_update` messages reflecting a
+built-in idle appearance whenever no connection is focused.
 
 #### Scenario: Render updates sent when a connection gains focus
 - **WHEN** a connection becomes the focused connection

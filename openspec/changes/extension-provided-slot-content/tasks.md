@@ -63,3 +63,63 @@
 - [x] 9.3 Add pixel-dimension guidance to `docs/PROTOCOL.md`'s existing "Icon and label content" section (raised separately during this change's planning — not previously documented at all)
 - [x] 9.4 Delete `docs/LAYOUT_CONFIG.md` entirely, and remove every cross-reference to it (`docs/PROTOCOL.md`'s current link, any README references)
 - [x] 9.5 Update `gatoway-core/README.md`/`stream-deck-plugin/README.md` if either references the old capability/layout model
+
+## 10. Amend for `ARCHITECTURE.md` v1.7 (QA-020: fixed-label addressing)
+
+Sections 1-9 above implemented and verified `ARCHITECTURE.md` v1.6's ordinal-index/
+placement-derived model, and passed QA (QA-016 line reused, actually QA-019) plus a
+partial live `/verify` pass. Live verification then surfaced QA-020: ordinal-index
+addressing resolved against *currently-placed* actions meant the same physical button
+could mean a different slot depending on unrelated placement changes. `design.md` has
+been rewritten in place (not appended) for the v1.7 model below — do not treat the v1.6
+description as still current; sections 1-9's checkboxes remain checked as an honest
+record of what was built and tested against v1.6, not because that model is still
+correct.
+
+- [ ] 10.1 Update `gatoway-core/src/protocol/messages.ts`: `SlotContent` unchanged in
+      shape, but `RegisterContent` becomes `Record<string, SlotContent>` (a flat map
+      keyed by label, e.g. `"B1"`, `"D1"`) in place of `{ buttons: SlotContent[];
+      dials: SlotContent[] }`. `CommandPayload` drops `controller`, keeping only
+      `label: string` plus `eventType`/`delta`.
+- [ ] 10.2 Update `gatoway-core/src/protocol/slotContentValidation.ts`: validate each
+      map entry's *key* is a currently-valid label (`B<n>`/`D<n>` within the most
+      recently reported `device_capacity` counts) in addition to the existing
+      value-shape validation (non-empty `label`, `icon` string, `state` only under a
+      `B`-prefixed key). Update `rejectedContent` to `{ label: string; reason: string
+      }[]` (drop the old `{ controller, index }` shape).
+- [ ] 10.3 Update `gatoway-core/src/connection/messageHandler.ts`'s registration
+      handling for the new map-based `content` and label-keyed `rejectedContent`.
+- [ ] 10.4 Rewrite `gatoway-core/src/routing/profileRouter.ts`'s D6 resolution:
+      derive a physical position's label from its index in `device_capacity`'s
+      position lists (`buttonPositions[i]` → `"B" + (i+1)`, `dialPositions[i]` →
+      `"D" + (i+1)`); look up that label directly in the focused connection's
+      `content` map instead of indexing into an array. `render_update`/idle-sweep
+      derivation follows the same label-keyed lookup, reversed.
+- [ ] 10.5 In `stream-deck-plugin/src/coreClient/deviceCapacity.ts`: change
+      `computeDeviceCapacity()` to derive `buttonPositions` from `Device.size`
+      (every `{row, column}` in the grid, not just currently-placed ones) and
+      `dialPositions` from a new `DeviceType` → dial-count mapping. Build and verify
+      this mapping against `@elgato/schemas`' own `DeviceType` documentation (dial
+      counts are only in prose, e.g. "Stream Deck + ... 4 dials" — do not guess or
+      assume completeness from memory; verify every entry actually used).
+- [ ] 10.6 Remove the `willAppear`/`willDisappear`-based placement-change listening
+      added in task 7.3 entirely (not left dormant) — capacity now only depends on
+      `Device.size`/`Device.type`, so only device connect/disconnect/change events
+      matter. Confirm `deviceCapacityEqual()` (or its equivalent) still makes sense
+      given capacity now only changes on a device event, not a placement event.
+- [ ] 10.7 Update all tests touched by 10.1-10.6: `slotContentValidation.test.ts`,
+      `messageHandler.test.ts`, `profileRouter.test.ts` (including the QA-019
+      overflow/mixed-sweep tests — re-express them against label-keyed content),
+      `deviceCapacity.test.ts` (drop placement-based scenarios, add
+      `Device.size`/`DeviceType`-based ones).
+- [ ] 10.8 Update `testAppClient.ts`/`tcpTestClient.ts`/`wsTestClient.ts` for the
+      label-keyed `content` map and the new `command`/`error` shapes.
+- [ ] 10.9 Update all four spec deltas under `specs/` (already rewritten in this
+      session — confirm they match the final implementation once built) and
+      `docs/PROTOCOL.md` (rewritten once for v1.6 in task 9.1-9.2 — needs a further
+      pass for the label-keyed shapes, dropped `controller` field, and the revised
+      `device_capacity`/`slot_capacity` meaning).
+- [ ] 10.10 Full test suite + typecheck, both workspaces. Live re-verification (crash
+      fix already confirmed working; device_capacity/slot_capacity delivery already
+      confirmed working under the old meaning — needs re-confirming under the new
+      one) resumes in `/verify` once this section is complete.
