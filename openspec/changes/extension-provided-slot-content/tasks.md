@@ -44,6 +44,7 @@
 - [x] 7.2 Send `device_capacity` once at the plugin's own registration with Gatoway core
 - [x] 7.3 Listen for the relevant Elgato SDK events (device connected/disconnected, action `willAppear`/`willDisappear`) and re-send `device_capacity` whenever the derived lists actually change
 - [x] 7.4 Confirm this doesn't interfere with existing render-state persistence (`renderStore.ts`) or the local-default-baseline behavior (QA-014's fix) — both should be unaffected
+- [x] 7.5 Update `manifest.json`'s `Software.MinimumVersion` from `"6.5"` to `"7.0"` — task 7.3's `onDeviceDidChange` listener requires Stream Deck 7.0+, and the Elgato SDK's own runtime validation throws synchronously on registration if the declared minimum is below that. Caught live during `/verify` (crash-loop on every startup); confirmed installed Stream Deck version is `7.0.3`, so `7.0` is a real, already-satisfied requirement, not a workaround.
 
 ## 8. Testing
 
