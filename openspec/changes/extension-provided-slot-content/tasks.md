@@ -123,3 +123,49 @@ correct.
       fix already confirmed working; device_capacity/slot_capacity delivery already
       confirmed working under the old meaning — needs re-confirming under the new
       one) resumes in `/verify` once this section is complete.
+
+## 11. Amend for `ARCHITECTURE.md` v1.8 (QA-021: unknown-vs-zero capacity; QA-022: canonical label form)
+
+Section 10 above implemented and QA-passed the v1.7 label-addressing model, except
+for two findings from that QA pass: QA-021 (Major, design-level — registering before
+capacity is known permanently rejects content, since "unknown" and "zero" were both
+represented as `0`) and QA-022 (Minor, code-level — the label-key parser accepted
+non-canonical forms like `"B01"` that could never be resolved). `design.md` and the
+`message-protocol` spec delta have been rewritten in place for both fixes — read them
+in full before starting; do not rely on memory of the v1.7-only model.
+
+- [ ] 11.1 Change `SlotCapacityPayload`'s `buttonSlots`/`dialSlots` from `number` to
+      `number | null` in `gatoway-core/src/protocol/messages.ts`. `null` means "not
+      yet known" (no `device_capacity` report ever received) — distinct from a known
+      `0`.
+- [ ] 11.2 Update wherever `slot_capacity` is constructed (`profileRouter.ts`) to emit
+      `null` when no `device_capacity` has been received yet, instead of `0`.
+- [ ] 11.3 Add broadcast logic: the first time real capacity becomes known (a
+      `device_capacity` report arrives after previously having none), and on every
+      subsequent `device_capacity` report (device change), send a fresh
+      `slot_capacity` to **every currently-connected application-type connection**
+      (not just whichever connection's own register/focus-gain would normally trigger
+      it) — iterate all connections excluding the `stream-deck`-typed one itself.
+- [ ] 11.4 Update `slotContentValidation.ts`'s label-key parser to reject non-canonical
+      forms (QA-022): exactly `B` or `D` followed by a positive integer with no
+      leading zeros and no other characters. Confirm this is enforced regardless of
+      whether capacity is currently known.
+- [ ] 11.5 Update range-checking in the same validator: when capacity for the relevant
+      dimension (`buttonSlots`/`dialSlots`) is `null` (unknown), skip the upper-bound
+      range check entirely for a canonically-formed key — accept it provisionally.
+      When capacity is known (a real number), check the range as before.
+- [ ] 11.6 Confirm no retroactive re-validation/rejection occurs when capacity
+      transitions from unknown to known for already-registered connections (D9) — a
+      previously-accepted, now-out-of-range label simply never renders, exactly like
+      any other out-of-range label; it is not actively dropped or re-reported via a
+      new `error`.
+- [ ] 11.7 Update tests: `slotContentValidation.test.ts` (unknown-capacity acceptance,
+      known-capacity range rejection, non-canonical form rejection regardless of
+      capacity state), `profileRouter.test.ts`/`messageHandler.test.ts` (the
+      broadcast-to-all-connections behavior on first-known and on-device-change,
+      `null` vs `0` in constructed `slot_capacity` payloads), and the manual test
+      clients if they assume `slot_capacity`'s fields are always numbers.
+- [ ] 11.8 Update `docs/PROTOCOL.md`'s `slot_capacity`/`register` sections for the
+      `null`/unknown state, the canonical-label-form requirement, and the broadcast
+      behavior.
+- [ ] 11.9 Full test suite + typecheck, both workspaces.

@@ -14,9 +14,18 @@ the user has gotten around to placing so far. The same physical button could mea
 different ordinal index depending on unrelated placement changes elsewhere on the
 device. v1.7 fixes this by addressing content with **fixed, stable position labels**
 (`"B1"`, `"B2"`, `"D1"`, ...) derived from the device's actual hardware capacity
-(`Device.size`/`Device.type`) rather than from live placement. This document now
-describes the v1.7 model throughout; the sections below have been rewritten, not
-appended to, to avoid describing two competing models.
+(`Device.size`/`Device.type`) rather than from live placement.
+
+**Further revised for `ARCHITECTURE.md` v1.8 (QA-021/QA-022).** QA review of the v1.7
+rework found that registering before the Stream Deck plugin has ever reported
+capacity wrongly and permanently rejected a plugin's content, because "capacity not
+yet known" and "capacity known to be zero" were both represented as `0` (QA-021,
+Major, design-level). A second, independent, code-level finding (QA-022, Minor) was
+bundled into the same fix since it touches the same validation code: the label-key
+parser accepted non-canonical numeric forms (e.g. `"B01"`) that could never actually
+be resolved. This document now describes the v1.8 model throughout; sections have
+been rewritten in place where they changed, not appended to, to avoid describing
+multiple competing models.
 
 ## Goals / Non-Goals
 
@@ -87,25 +96,44 @@ memory).
   `"B2"`, ..., `dialPositions[0]` is `"D1"`, and so on (1-based numbering in the
   label, 0-based indexing into the array).
 
-**D2 — `slot_capacity` (core → each application plugin): bare counts only.** An
-application plugin derives its own valid label set (`"B1".."B<buttonSlots>"`,
-`"D1".."D<dialSlots>"`) from these counts using the documented labeling convention —
-the actual label strings are never enumerated over the wire, since both sides derive
-them identically from the same counts.
+**D2 — `slot_capacity` (core → each application plugin): bare counts, now
+distinguishing unknown from zero.** An application plugin derives its own valid
+label set (`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using
+the documented labeling convention — the actual label strings are never enumerated
+over the wire, since both sides derive them identically from the same counts.
 
 ```jsonc
 { "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": 8, "dialSlots": 4 } }
+{ "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": null, "dialSlots": null } }
+```
+
+```ts
+interface SlotCapacityPayload {
+  buttonSlots: number | null;  // null = not yet known (Stream Deck plugin hasn't reported)
+  dialSlots: number | null;
+}
 ```
 
 - Sent to a connection once immediately after its own successful `register_ack`, and
   again every time Gatoway core records that connection as newly focused (i.e. right
   alongside the existing internal `focus_changed` handling) — never on blur.
+- **(v1.8, QA-021 fix)** Also sent, unsolicited, to **every currently-connected
+  application plugin** the first time real capacity becomes known after having been
+  unknown, and again on any subsequent `device_capacity` change — not just to
+  whichever connection's own register/focus-gain happened to trigger it. This is a
+  genuine broadcast: Gatoway core iterates every connection with an application
+  `pluginType` (i.e. not the `stream-deck` connection itself) and sends each one a
+  fresh `slot_capacity`.
 - Derived directly from the Stream Deck plugin's latest `device_capacity` report
   (`buttonSlots = buttonPositions.length`, `dialSlots = dialPositions.length`). If no
   `device_capacity` has ever been received yet (e.g. Stream Deck plugin not yet
-  connected), both counts are `0`.
-- Unchanged in wire shape from the original design — only its *meaning* changed
-  (fixed physical capacity, not live placement count).
+  connected), both counts are `null` — **not `0`**, per QA-021: `0` is a real, valid
+  state (a device that genuinely has no dials), so it must never be used to mean
+  "unknown."
+- A plugin author should treat any arrival of `slot_capacity` the same way,
+  regardless of what triggered it (own registration, own focus-gain, or this new
+  broadcast) — there is no way to distinguish the trigger from the message itself,
+  nor any need to.
 
 **D3 — `register`'s capability declaration becomes `content`, a flat label-keyed
 map.**
@@ -159,18 +187,39 @@ type RegisterContent = Record<string, SlotContent>; // keyed by label, e.g. "B1"
   sends fresh `render_update`s for every label that changed.
 
 **D4 — Validation moves from `Capability` shape to `SlotContent` shape, keyed by
-label.** Each entry in `content` is validated independently: the **key** itself must
-match the labeling convention for a currently-known-valid label (i.e. `B<n>` where
-`1 <= n <= buttonSlots`, or `D<n>` where `1 <= n <= dialSlots`, per the most recent
-`device_capacity`) — an unrecognized or out-of-range label is itself a rejection
+label.** Each entry in `content` is validated independently. The **key** must first
+be in **canonical form**: exactly `B` or `D`, followed by a positive integer with no
+leading zeros and no other characters (`"B1"`, `"B12"` are valid; `"B01"`, `"b1"`,
+`"B1x"` are not — **QA-022 fix**: the original v1.7 implementation's key parser
+accepted non-canonical numeric forms like `"B01"`, which passed validation but could
+never actually be resolved, since the resolver only ever derives canonical labels).
+Once a key is confirmed canonical, its range is checked against the current known
+capacity — **but only if that capacity is actually known** (D2): while capacity is
+still `null` (unknown), range checking is skipped entirely for that dimension (a
+canonical-but-out-of-range-once-known label is accepted provisionally, exactly as if
+it might turn out valid — see D9 for what happens once capacity becomes known). Once
+capacity is known, `B<n>` where `1 <= n <= buttonSlots` (or `D<n>` similarly for
+dials) is required; an out-of-range or non-canonical label is itself a rejection
 reason, not just its value. The **value** is validated exactly as before: `label`
 non-empty string (required); `icon` a string if present (no `null` at registration);
 `state` a number if present, and only valid under a `B`-prefixed key (present under a
 `D`-prefixed key is itself a rejection). An invalid entry is dropped from the map (not
 the whole registration), reported via the existing `error` message shape with
-`rejectedContent: [{ label: string, reason: string }]` (the field addressed by the
-label itself now, replacing the prior design's index-based addressing — there is no
-index anymore, only the label).
+`rejectedContent: [{ label: string, reason: string }]`.
+
+**D9 — (New, v1.8) Content is not re-validated retroactively when capacity becomes
+known; it is simply re-rendered against whatever the connection already declared.**
+When a label was accepted at registration time because capacity was then unknown (D4),
+and capacity subsequently becomes known, Gatoway core does **not** go back and
+reject/drop that label even if it later turns out to be out-of-range for the real
+capacity — it simply never renders, exactly like any other declared-but-out-of-range
+label (D1's existing "a label with nothing placed there doesn't render" behavior).
+This avoids needing a second validation pass with its own `error`-reporting semantics
+for a case that already degrades safely through the existing render/idle-sweep path.
+A plugin that wants accurate rejection feedback for a label it declared while capacity
+was unknown should simply re-`register` after receiving the broadcast `slot_capacity`
+that tells it real capacity is now known (D2) — at that point, normal range validation
+applies and any genuinely-invalid label is reported via `error` as usual.
 
 **D5 — `command`'s resolved target becomes the fixed label itself; `controller` is
 dropped.**
@@ -242,10 +291,12 @@ is a net reduction in code, not a change kept dormant alongside the new mechanis
   design).
 - [Risk] The `DeviceType` → dial-count mapping (D1) is new, hand-authored reference
   data with no runtime source of truth in the SDK — if Elgato ships a new device
-  type, this mapping will be silently wrong (defaulting to whatever fallback the
-  developer chooses, e.g. 0 dials) until updated. Not a blocker for this change (only
-  the Stream Deck+ model is in active use), but worth a code comment flagging it for
-  future maintenance.
+  type, this mapping needs a new entry. **Corrected per QA review of the v1.7
+  rework**: if implemented as a `Record<DeviceType, number>` (a TypeScript mapped
+  type over the full enum), an unmapped new `DeviceType` is a *compile-time* error,
+  not a silent runtime gap — this is safer than originally stated here, not weaker.
+  Still worth a code comment flagging it for future maintenance when Elgato adds a
+  device type and the project upgrades its SDK dependency.
 - [Trade-off] Not enforcing "every physical position must have a generic action
   placed" at the protocol level (Non-Goals) means a plugin can declare a label that
   never renders because nothing is placed there yet — accepted as consistent with
@@ -253,6 +304,13 @@ is a net reduction in code, not a change kept dormant alongside the new mechanis
   position failing safe, not failing loud), and because there is no SDK mechanism to
   enforce or automate full placement anyway (confirmed: no `createAction`/
   programmatic placement API exists in `@elgato/streamdeck`).
+- [Trade-off] (v1.8) A plugin that registers while capacity is unknown and never
+  re-registers after receiving the broadcast `slot_capacity` (D2) will simply never
+  render any label that turns out to be out-of-range once capacity is known, with no
+  further signal — accepted per D9's reasoning: this degrades exactly like any other
+  declared-but-unrenderable label already does, and a well-behaved plugin author
+  reacting to `slot_capacity` (which it must already do to size its content
+  correctly in the first place) will naturally re-register anyway.
 
 ## Migration Plan
 
@@ -265,8 +323,11 @@ in this same change; this is a further revision of that same work, not new scope
 
 ## Open Questions
 
-None outstanding — the trade-offs around label-vs-index addressing and dropping
+None outstanding. The trade-offs around label-vs-index addressing and dropping
 `controller` from `command` were confirmed acceptable with the user during the
-architecture session that produced `ARCHITECTURE.md` v1.7, on the condition that the
-chosen representation is documented clearly and applied consistently (satisfied by
-this document and the delta specs).
+architecture session that produced `ARCHITECTURE.md` v1.7. The unknown-vs-zero
+capacity distinction and the decision to broadcast (rather than have plugins poll)
+were confirmed with the user during the session that produced `ARCHITECTURE.md`
+v1.8, specifically choosing the push-based broadcast to stay consistent with this
+project's established event-driven philosophy (AD-7, AD-9) over any retry/poll-based
+alternative.

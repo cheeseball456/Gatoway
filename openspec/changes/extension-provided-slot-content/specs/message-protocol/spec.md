@@ -7,14 +7,18 @@ that Gatoway core sends in response. A new connection — including one reconnec
 after a previous connection from the same plugin disconnected — SHALL send a fresh
 `register`; nothing from a prior, now-disconnected connection carries over to it.
 Content is declared as a flat map keyed by fixed physical-position label (e.g.
-`"B1"`, `"D1"` — a `B`/`D` prefix plus a 1-based ordinal, self-describing button vs.
-dial) — never by any plugin-chosen identifier. Each entry SHALL be validated against
-the `SlotContent` shape (non-empty `label`, `icon` a string if present, `state` a
-number if present and only under a `B`-prefixed key); an entry that fails validation,
-or whose key is not a currently-valid label for the most recently reported device
-capacity, SHALL be dropped from the connection's declared content rather than causing
+`"B1"`, `"D1"` — a `B`/`D` prefix plus a 1-based ordinal, no leading zeros, and no
+other characters; `"B01"` or `"b1"` are not canonical and SHALL be rejected) — never
+by any plugin-chosen identifier. Each entry SHALL be validated against the
+`SlotContent` shape (non-empty `label`, `icon` a string if present, `state` a number
+if present and only under a `B`-prefixed key); an entry that fails validation, has a
+non-canonical key, or whose key is out of range for the most recently reported device
+capacity SHALL be dropped from the connection's declared content rather than causing
 the whole registration to fail, and Gatoway core SHALL send an `error` message
-afterward identifying which entries were rejected and why. Sending `register` again
+afterward identifying which entries were rejected and why. **While device capacity is
+not yet known** (see `slot_capacity`'s `null` state), a canonical key's range SHALL
+NOT be checked — only its canonical form and its value shape — since there is no
+known bound to check against yet. Sending `register` again
 on an already-authenticated connection fully replaces its previously-declared
 content — omitting `content` leaves it unchanged; an explicit `content` (including an
 empty map) always replaces it. This is the only mechanism for any content change (a
@@ -34,8 +38,16 @@ type exists.
 - **THEN** the new connection has no declared content until it sends a fresh `register` message — the previous connection's declared content does not carry over
 
 #### Scenario: Malformed content entry dropped, registration still succeeds
-- **WHEN** a plugin sends a `register` message whose `content` map contains one invalid entry (e.g. missing `label`, a `state` field under a dial-prefixed key, or a key that isn't a currently-valid label) alongside otherwise-valid entries
+- **WHEN** a plugin sends a `register` message whose `content` map contains one invalid entry (e.g. missing `label`, a `state` field under a dial-prefixed key, or a key that is out of range for the currently-known device capacity) alongside otherwise-valid entries
 - **THEN** Gatoway core registers the connection successfully with only the valid entries, and sends a follow-up `error` message identifying the rejected entry (by its label) and the reason it was rejected
+
+#### Scenario: Non-canonical label form rejected
+- **WHEN** a plugin sends a `register` message whose `content` map contains a key that is not in canonical form (e.g. `"B01"` with a leading zero, or `"b1"` in lowercase)
+- **THEN** Gatoway core drops that entry and reports it via a follow-up `error` message, regardless of whether device capacity is currently known
+
+#### Scenario: Canonical label accepted provisionally while capacity is unknown
+- **WHEN** a plugin sends a `register` message whose `content` map contains a canonically-formed key (e.g. `"B5"`), and Gatoway core does not yet know the device's capacity
+- **THEN** Gatoway core accepts that entry into the connection's declared content without checking whether `5` is actually in range — it may or may not ever render, depending on what capacity turns out to be once known
 
 #### Scenario: All content entries malformed still registers with empty content
 - **WHEN** every entry in a `register` message's `content` map fails validation
@@ -92,25 +104,38 @@ changes (connected, disconnected, or replaced by a different device).
 ### Requirement: Slot Capacity Message Type
 The protocol SHALL define a `slot_capacity` message type that Gatoway core sends to an
 application plugin, reporting how many button slots and dial slots the connected
-device physically has (`{ buttonSlots: number, dialSlots: number }`), derived from
-the most recent `device_capacity` report. An application plugin derives its own valid
-label set (`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using
-the documented labeling convention; the actual label strings are never enumerated
-over the wire. It SHALL be sent once immediately after that connection's own
-successful `register_ack`, and again every time Gatoway core records that connection
-as newly focused.
+device physically has (`{ buttonSlots: number | null, dialSlots: number | null }`),
+derived from the most recent `device_capacity` report. A `null` value SHALL mean
+capacity is not yet known (no `device_capacity` report has ever been received) —
+distinct from a known value of `0`, which means the device is known to genuinely have
+none of that control type. An application plugin derives its own valid label set
+(`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts, once known,
+using the documented labeling convention; the actual label strings are never
+enumerated over the wire. It SHALL be sent once immediately after that connection's
+own successful `register_ack`, again every time Gatoway core records that connection
+as newly focused, and again, unsolicited, to every currently-connected application
+plugin the first time real capacity becomes known after having been unknown, and on
+any subsequent `device_capacity` change.
 
 #### Scenario: New connection receives initial capacity
-- **WHEN** an application plugin registers successfully
+- **WHEN** an application plugin registers successfully, and capacity is already known
 - **THEN** Gatoway core sends it a `slot_capacity` message reflecting the device's current button/dial slot counts
 
 #### Scenario: Capacity is refreshed on focus gain
 - **WHEN** an application plugin reports gaining focus
 - **THEN** Gatoway core sends it a fresh `slot_capacity` message reflecting the current counts, which may differ from what it received at connection time if the device itself changed in between
 
-#### Scenario: No capacity reported before the Stream Deck plugin connects
+#### Scenario: Unknown capacity reported before the Stream Deck plugin connects
 - **WHEN** an application plugin registers before any `device_capacity` report has ever been received
-- **THEN** Gatoway core sends it a `slot_capacity` message with both counts at zero
+- **THEN** Gatoway core sends it a `slot_capacity` message with both counts `null`, not `0`
+
+#### Scenario: All connected plugins are notified once capacity first becomes known
+- **WHEN** the Stream Deck plugin sends its first-ever `device_capacity` report, after one or more application plugins already registered while capacity was still unknown
+- **THEN** Gatoway core sends each of those already-connected application plugins a fresh, unsolicited `slot_capacity` message reflecting the now-known counts, without waiting for their next registration or focus change
+
+#### Scenario: All connected plugins are notified when the device itself changes
+- **WHEN** the connected Stream Deck device changes (disconnected, or replaced by a different device) while one or more application plugins are already connected
+- **THEN** Gatoway core sends each connected application plugin a fresh, unsolicited `slot_capacity` message reflecting the new counts
 
 ## REMOVED Requirements
 
