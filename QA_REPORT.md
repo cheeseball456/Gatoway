@@ -1477,3 +1477,27 @@ Error: [ERR_NOT_SUPPORTED]: onDeviceDidChange requires Stream Deck version 7.0 o
 **Recommendation:** ❌ **Requires fixes** — this is a Critical, code-level, unconditional blocker. Route to `developer` for the one-line manifest fix, then resume this `/verify` session to complete the live checks that couldn't even begin (device capacity detection/reporting, live focus/render/input round trip, re-registration re-render, overflow/underflow on real hardware).
 
 ---
+
+## Resumed session (same day, after the manifest fix landed — commit `83cbcde`)
+
+Plugin confirmed no longer crash-looping; clean startup log; `device_capacity` correctly reported `{buttonPositions: [], dialPositions: []}` at registration, then updated ~5s later to the 3 buttons + 1 dial actually placed on the active profile. Connected the manual `testAppClient.ts` (fixture: 2 buttons + 1 dial, deliberately fewer than the device's 3 buttons, to exercise underflow): `slot_capacity` correctly reported `{buttonSlots: 3, dialSlots: 1}` at registration and again on focus-gain; on `focus: true`, the physical device rendered "Fixture A"/"Fixture B" on the first two buttons, the idle "Gatoway" label on the third (correct underflow behavior), and "Fixture Dial" on the dial — confirmed visually by the user against the real hardware, matching the logged `render_update`s exactly.
+
+### QA-020 (Major, root-cause: design) — `device_capacity` reports currently-placed actions, not the device's actual physical capacity
+
+**What:** `device_capacity` (`stream-deck-plugin/src/coreClient/deviceCapacity.ts`'s `computeDeviceCapacity()`) derives its position lists entirely from the Elgato SDK's `Device.actions` — i.e. only the generic Key/Dial actions the user has manually placed on the *currently active profile* right now. It never surfaces the device's actual hardware capacity (`Device.size` — raw key grid dimensions — or `Device.type`, which implies a fixed dial count per model) to Gatoway core or, in turn, to any application plugin.
+
+**Scenario:** The user, testing on a real Stream Deck+ (physically 8 keys + 4 dials), pointed out that different Stream Deck models have very different total physical capacities (e.g. a 32-key-only model; a 32-key + 8-dial model) and that an application plugin needs to know the device's actual capacity to plan a sensible, stable layout for that hardware — not just react to however many the user happens to have manually placed on the currently-active profile at any given moment. Today's `slot_capacity` (bare counts sent to app plugins) only ever reflects the latter.
+
+**Evidence:** `computeDeviceCapacity()`'s own docstring confirms this is by design: "Filters `Device.actions` down to just these two manifest ids... Only considers devices currently reported connected — matches 'currently holding a generic Key/Dial action.'" No code path anywhere in this change reads `Device.size`/`Device.type` at all. This matches `ARCHITECTURE.md` v1.6's AD-9 and `design.md`'s D1 exactly as written — the implementation is not wrong relative to what was designed.
+
+**Impact:** An application plugin currently has no way to distinguish "this device model physically only has 3 slots" from "this device model has 8 slots but the user has only placed 3 generic actions so far" — both look identical (`buttonSlots: 3`) from the plugin's point of view. A plugin trying to plan a stable layout suited to the actual hardware (e.g. "put my 4 most-used continuous parameters on this device's 4 dials") cannot do so reliably today.
+
+**Root-cause level:** Design. The requirement this serves (FR-007 — "Gatoway tells each plugin how many slots it has so the plugin can decide what to show") was captured correctly, but `AD-9`'s specific choice of *what number to report* may not fully satisfy the intent behind it once a plugin author needs to reason about the physical device shape, not just current placement. This is not a code defect — the code does exactly what `AD-9`/D1 specify — so it should not be patched ad hoc; it needs an architecture-level decision on whether `device_capacity`/`slot_capacity` should carry raw device capacity in addition to (or instead of) currently-placed count.
+
+**Suggested fix direction:** Not prescribing the exact mechanism — this needs a `/design-architecture` revisit to decide, e.g., whether to add the device's raw `size`/dial-count (derived from `Device.type`, which the SDK already exposes) as an additional field the Stream Deck plugin reports, and how a plugin should reconcile "physical capacity" against "currently placed" (since a physically-8-key device with only 3 keys currently placed still can't render more than 3 things, regardless of what the plugin is told the hardware supports).
+
+## Status (updated)
+
+**Recommendation:** ❌ **Requires fixes** — QA-020 is Major, design-level, and should not be patched in code without an architecture decision first. Live verification of everything else this session covered (crash fix, `device_capacity`/`slot_capacity` delivery and accuracy, underflow rendering) passed cleanly. Remaining live checks (physical key press → `command` resolution, re-registration re-render, overflow rendering, profile-switch capacity transitions) are paused pending resolution of QA-020, since the fix may change what data these checks need to exercise.
+
+---
