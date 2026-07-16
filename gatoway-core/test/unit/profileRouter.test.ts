@@ -20,6 +20,22 @@ const DEVICE_CAPACITY = {
   dialPositions: [{ index: 0 }],
 };
 
+/**
+ * A multi-position device capacity (QA-019): 3 button slots + 2 dial slots, so
+ * overflow (a connection declaring more content entries than a controller has physical
+ * positions for) and mixed populated/idle sweeps can actually be distinguished from the
+ * single-position fixture above, which can't tell "no content" apart from "overflow
+ * dropped" or "some slots idle, some populated" apart from "all slots the same".
+ */
+const MULTI_DEVICE_CAPACITY = {
+  buttonPositions: [
+    { row: 0, column: 0 },
+    { row: 0, column: 1 },
+    { row: 0, column: 2 },
+  ],
+  dialPositions: [{ index: 0 }, { index: 1 }],
+};
+
 function acceptConnection(manager: ConnectionManager, sent: unknown[]) {
   return manager.accept({
     transport: "tcp",
@@ -28,12 +44,17 @@ function acceptConnection(manager: ConnectionManager, sent: unknown[]) {
   });
 }
 
-/** Registers the Stream Deck connection and reports the fixture device capacity. */
-function registerStreamDeck(router: ProfileRouter, manager: ConnectionManager, sent: unknown[]) {
+/** Registers the Stream Deck connection and reports the given (or fixture) device capacity. */
+function registerStreamDeck(
+  router: ProfileRouter,
+  manager: ConnectionManager,
+  sent: unknown[],
+  capacity = DEVICE_CAPACITY,
+) {
   const streamDeck = acceptConnection(manager, sent);
   manager.transition(streamDeck.id, "authenticated");
   manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, { buttons: [], dials: [] });
-  router.handleDeviceCapacity(streamDeck, DEVICE_CAPACITY);
+  router.handleDeviceCapacity(streamDeck, capacity);
   return streamDeck;
 }
 
@@ -400,6 +421,115 @@ describe("ProfileRouter", () => {
       expect(sent).toEqual([
         { type: "slot_capacity", connectionId: app.id, payload: { buttonSlots: 0, dialSlots: 0 } },
       ]);
+    });
+  });
+
+  describe("overflow / multi-position mixed sweep (QA-019)", () => {
+    it("never renders or resolves past device capacity when a connection declares more content entries than physical slots (overflow)", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, logger });
+      const streamDeckSent: unknown[] = [];
+      const streamDeck = registerStreamDeck(router, manager, streamDeckSent, MULTI_DEVICE_CAPACITY);
+      streamDeckSent.length = 0;
+
+      // 5 button entries and 4 dial entries declared, but the device only has 3 button
+      // slots and 2 dial slots - the entries beyond capacity (index 3+ for buttons,
+      // index 2+ for dials) have no physical position and must never be rendered.
+      const appSent: unknown[] = [];
+      const app = acceptConnection(manager, appSent);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", {
+        buttons: [
+          { label: "Button 0" },
+          { label: "Button 1" },
+          { label: "Button 2" },
+          { label: "Button 3 (overflow)" },
+          { label: "Button 4 (overflow)" },
+        ],
+        dials: [
+          { label: "Dial 0" },
+          { label: "Dial 1" },
+          { label: "Dial 2 (overflow)" },
+          { label: "Dial 3 (overflow)" },
+        ],
+      });
+
+      router.handleFocus(app, { focused: true });
+
+      const keypadUpdates = streamDeckSent.filter(
+        (m) => (m as { payload: { controller?: string } }).payload.controller === "keypad",
+      ) as { payload: { position: unknown; label: string } }[];
+      const encoderUpdates = streamDeckSent.filter(
+        (m) => (m as { payload: { controller?: string } }).payload.controller === "encoder",
+      ) as { payload: { position: unknown; label: string } }[];
+
+      // Exactly one render_update per physical position - never one per declared entry.
+      expect(keypadUpdates).toHaveLength(3);
+      expect(encoderUpdates).toHaveLength(2);
+      expect(keypadUpdates.map((m) => m.payload.label)).toEqual(["Button 0", "Button 1", "Button 2"]);
+      expect(encoderUpdates.map((m) => m.payload.label)).toEqual(["Dial 0", "Dial 1"]);
+      // The overflow entries never appear anywhere in the sweep.
+      const allLabels = streamDeckSent.map((m) => (m as { payload: { label: string } }).payload.label);
+      expect(allLabels).not.toContain("Button 3 (overflow)");
+      expect(allLabels).not.toContain("Button 4 (overflow)");
+      expect(allLabels).not.toContain("Dial 2 (overflow)");
+      expect(allLabels).not.toContain("Dial 3 (overflow)");
+
+      // An input_event at the last in-capacity position still resolves normally.
+      router.handleInputEvent(streamDeck, {
+        controller: "keypad",
+        position: { row: 0, column: 2 },
+        eventType: "keyDown",
+      });
+      expect(appSent.filter((m) => (m as { type: string }).type === "command")).toEqual([
+        {
+          type: "command",
+          connectionId: app.id,
+          payload: { controller: "keypad", slotIndex: 2, eventType: "keyDown", delta: undefined },
+        },
+      ]);
+    });
+
+    it("renders a mixed sweep of populated and idle positions in a single focus render (not all-idle or all-populated)", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const focusTracker = new FocusTracker(logger);
+      const router = new ProfileRouter({ manager, focusTracker, logger });
+      const streamDeckSent: unknown[] = [];
+      registerStreamDeck(router, manager, streamDeckSent, MULTI_DEVICE_CAPACITY);
+      streamDeckSent.length = 0;
+
+      // Declares fewer entries than physical capacity for both controllers: 2 of 3
+      // button slots and 1 of 2 dial slots get real content; the rest must fall back to
+      // the idle appearance in the very same sweep.
+      const app = acceptConnection(manager, []);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", {
+        buttons: [{ label: "Button 0", icon: "b0.png" }, { label: "Button 1", icon: "b1.png" }],
+        dials: [{ label: "Dial 0" }],
+      });
+
+      router.handleFocus(app, { focused: true });
+
+      const keypadUpdates = streamDeckSent.filter(
+        (m) => (m as { payload: { controller?: string } }).payload.controller === "keypad",
+      ) as { payload: { position: unknown; label: string; icon: string | null } }[];
+      const encoderUpdates = streamDeckSent.filter(
+        (m) => (m as { payload: { controller?: string } }).payload.controller === "encoder",
+      ) as { payload: { position: unknown; label: string; icon: string | null } }[];
+
+      expect(keypadUpdates).toHaveLength(3);
+      expect(keypadUpdates[0]!.payload).toMatchObject({ label: "Button 0", icon: "b0.png" });
+      expect(keypadUpdates[1]!.payload).toMatchObject({ label: "Button 1", icon: "b1.png" });
+      // The third button position has no declared entry - idle, in the same sweep as
+      // the two populated positions above (not a separate all-idle sweep).
+      expect(keypadUpdates[2]!.payload).toMatchObject({ label: "Gatoway", icon: null });
+
+      expect(encoderUpdates).toHaveLength(2);
+      expect(encoderUpdates[0]!.payload).toMatchObject({ label: "Dial 0" });
+      expect(encoderUpdates[1]!.payload).toMatchObject({ label: "Gatoway", icon: null });
     });
   });
 
