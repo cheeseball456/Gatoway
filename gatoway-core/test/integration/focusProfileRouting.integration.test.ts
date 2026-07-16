@@ -6,23 +6,30 @@ import { startTcpListener, type TcpListenerHandle } from "../../src/connection/t
 import { FocusTracker } from "../../src/focus/focusTracker.js";
 import { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "../../src/routing/profileRouter.js";
 import { encodeMessage, type GatowayMessage } from "../../src/protocol/envelope.js";
-import type { RegisterContent } from "../../src/protocol/messages.js";
+import type { DeviceCapacityPayload, RegisterContent } from "../../src/protocol/messages.js";
 import { encodeNdjsonLine, NdjsonDecoder } from "../../src/protocol/tcpFraming.js";
 
 /**
  * The fixture device capacity a test-double Stream Deck connection reports
- * (extension-provided-slot-content design.md D1): one button slot, one dial slot. An
- * application test-double declares content sized to fit (or deliberately not, to
- * exercise underflow).
+ * (extension-provided-slot-content design.md D1, amended v1.7 for QA-020): one button
+ * slot ("B1"), one dial slot ("D1"). An application test-double declares content
+ * addressed by those fixed labels, sized to fit (or deliberately not, to exercise
+ * underflow).
  */
-const DEVICE_CAPACITY = {
+const DEVICE_CAPACITY: DeviceCapacityPayload = {
   buttonPositions: [{ row: 0, column: 0 }],
   dialPositions: [{ index: 0 }],
 };
 
+/** A two-button-slot capacity, used by the content-validation tests below to exercise a shape-invalid (not out-of-range) rejection at a second, still in-capacity label. */
+const TWO_BUTTON_DEVICE_CAPACITY: DeviceCapacityPayload = {
+  buttonPositions: [{ row: 0, column: 0 }, { row: 0, column: 1 }],
+  dialPositions: [{ index: 0 }],
+};
+
 const FIXTURE_CONTENT: RegisterContent = {
-  buttons: [{ label: "Fixture A", icon: "fixture-a.png" }],
-  dials: [{ label: "Fixture Dial" }],
+  B1: { label: "Fixture A", icon: "fixture-a.png" },
+  D1: { label: "Fixture Dial" },
 };
 
 async function findFreePort(): Promise<number> {
@@ -122,11 +129,11 @@ class TestDoubleClient {
 /**
  * Integration test using test-double TCP connections: no real second application
  * plugin exists yet, so this exercises focus tracking, live slot-capacity tracking, and
- * ordinal-index profile routing against a real, running Gatoway core TCP listener - one
- * test-double connection stands in for the Stream Deck plugin (registers as
- * `stream-deck`, reports `device_capacity`), another stands in for an application
- * plugin (registers with `content`, reports focus, and is the target of resolved
- * `command` messages).
+ * label-addressed profile routing (amended v1.7 for QA-020) against a real, running
+ * Gatoway core TCP listener - one test-double connection stands in for the Stream Deck
+ * plugin (registers as `stream-deck`, reports `device_capacity`), another stands in for
+ * an application plugin (registers with `content`, reports focus, and is the target of
+ * resolved `command` messages).
  */
 describe("focus tracking + profile routing (integration)", () => {
   let handle: TcpListenerHandle | undefined;
@@ -154,10 +161,14 @@ describe("focus tracking + profile routing (integration)", () => {
     return { port, token };
   }
 
-  /** Registers the Stream Deck test-double and reports the fixture device capacity. */
-  async function registerStreamDeck(port: number, token: string): Promise<TestDoubleClient> {
+  /** Registers the Stream Deck test-double and reports the given (or fixture) device capacity. */
+  async function registerStreamDeck(
+    port: number,
+    token: string,
+    capacity: DeviceCapacityPayload = DEVICE_CAPACITY,
+  ): Promise<TestDoubleClient> {
     const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
-    streamDeck.send({ type: "device_capacity", payload: DEVICE_CAPACITY });
+    streamDeck.send({ type: "device_capacity", payload: capacity });
     // No ack for device_capacity - give it a moment to be processed before proceeding.
     await new Promise((resolve) => setTimeout(resolve, 50));
     return streamDeck;
@@ -219,7 +230,7 @@ describe("focus tracking + profile routing (integration)", () => {
     );
   });
 
-  it("routes a resolved input_event to the focused application connection as a command with its ordinal slotIndex", async () => {
+  it("routes a resolved input_event to the focused application connection as a command with its fixed label", async () => {
     const { port, token } = await start();
 
     const streamDeck = await registerStreamDeck(port, token);
@@ -237,8 +248,7 @@ describe("focus tracking + profile routing (integration)", () => {
 
     const [command] = await app.waitForMessageType("command");
     expect(command.payload).toEqual({
-      controller: "keypad",
-      slotIndex: 0,
+      label: "B1",
       eventType: "keyDown",
       delta: undefined,
     });
@@ -264,7 +274,7 @@ describe("focus tracking + profile routing (integration)", () => {
     expect(app.received.filter((m) => m.type === "command")).toHaveLength(0);
   });
 
-  it("silently ignores an input_event when the focused application declared fewer entries than physical capacity (underflow)", async () => {
+  it("silently ignores an input_event when the focused application declared no content for the resolved label (underflow)", async () => {
     const { port, token } = await start();
 
     const streamDeck = await registerStreamDeck(port, token);
@@ -301,10 +311,9 @@ describe("focus tracking + profile routing (integration)", () => {
     expect((keypadOneFromA?.payload as { icon?: string | null }).icon).toBe("fixture-a.png");
 
     // App B directly supersedes App A's focus (last-report-wins, no intervening
-    // blur/idle sweep) - its own content at the same ordinal index has no icon.
+    // blur/idle sweep) - its own content at the same label has no icon.
     const appB = await TestDoubleClient.connectAndRegister(port, token, "test-app-b", {
-      buttons: [{ label: "No Icon" }],
-      dials: [],
+      B1: { label: "No Icon" },
     });
     clients.push(appB);
     appB.send({ type: "focus", payload: { focused: true } });
@@ -369,7 +378,7 @@ describe("focus tracking + profile routing (integration)", () => {
         type: "register",
         payload: {
           pluginType: "test-app",
-          content: { buttons: [{ label: "Fixture A!", icon: "fixture-a-active.png" }], dials: [] },
+          content: { B1: { label: "Fixture A!", icon: "fixture-a-active.png" } },
         },
       });
 
@@ -414,7 +423,7 @@ describe("focus tracking + profile routing (integration)", () => {
         type: "register",
         payload: {
           pluginType: "test-app-b",
-          content: { buttons: [{ label: "Should Not Render" }], dials: [] },
+          content: { B1: { label: "Should Not Render" } },
         },
       });
 
@@ -427,9 +436,15 @@ describe("focus tracking + profile routing (integration)", () => {
     it("registers successfully with only the valid content entries and sends a follow-up error naming the rejected one", async () => {
       const { port, token } = await start();
 
+      // Two button slots known up front (Stream Deck registers first), so "B2" is a
+      // currently-valid label - the rejection below is purely shape-based (an empty
+      // "label" value), not an out-of-range label (design.md D4, amended v1.7).
+      const streamDeck = await registerStreamDeck(port, token, TWO_BUTTON_DEVICE_CAPACITY);
+      clients.push(streamDeck);
+
       const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", {
-        buttons: [{ label: "Fixture A" }, { label: "" }],
-        dials: [],
+        B1: { label: "Fixture A" },
+        B2: { label: "" },
       } as unknown as RegisterContent);
       clients.push(app);
 
@@ -437,15 +452,13 @@ describe("focus tracking + profile routing (integration)", () => {
       expect(
         (
           errorMessage.payload as {
-            details: { rejectedContent: { controller: string; index: number; reason: string }[] };
+            details: { rejectedContent: { label: string; reason: string }[] };
           }
         ).details.rejectedContent,
-      ).toEqual([{ controller: "keypad", index: 1, reason: '"label" must be a non-empty string' }]);
+      ).toEqual([{ label: "B2", reason: '"label" must be a non-empty string' }]);
 
       // Registration still succeeded with the valid content: focusing and resolving an
       // input_event against it still works end to end.
-      const streamDeck = await registerStreamDeck(port, token);
-      clients.push(streamDeck);
       app.send({ type: "focus", payload: { focused: true } });
       await streamDeck.waitForMessageType("render_update", 1);
       streamDeck.send({
@@ -454,8 +467,7 @@ describe("focus tracking + profile routing (integration)", () => {
       });
       const [command] = await app.waitForMessageType("command");
       expect(command.payload).toEqual({
-        controller: "keypad",
-        slotIndex: 0,
+        label: "B1",
         eventType: "keyDown",
         delta: undefined,
       });
@@ -464,9 +476,14 @@ describe("focus tracking + profile routing (integration)", () => {
     it("registers with empty content and sends a follow-up error when every declared entry is malformed", async () => {
       const { port, token } = await start();
 
+      // Stream Deck registers first, so "B1"/"D1" are both in-range - the rejections
+      // below are purely shape-based (design.md D4, amended v1.7).
+      const streamDeck = await registerStreamDeck(port, token);
+      clients.push(streamDeck);
+
       const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", {
-        buttons: [{ label: "" }],
-        dials: [{ label: "Zoom", state: 1 }],
+        B1: { label: "" },
+        D1: { label: "Zoom", state: 1 },
       } as unknown as RegisterContent);
       clients.push(app);
 
@@ -477,10 +494,33 @@ describe("focus tracking + profile routing (integration)", () => {
       expect(
         (
           errorMessage.payload as {
-            details: { rejectedContent: { controller: string; index: number; reason: string }[] };
+            details: { rejectedContent: { label: string; reason: string }[] };
           }
         ).details.rejectedContent,
       ).toHaveLength(2);
+    });
+
+    it("rejects a content entry whose key is out of range for the currently-reported device capacity", async () => {
+      const { port, token } = await start();
+
+      // Only one button slot known ("B1") - "B2" is a currently-invalid (out-of-range)
+      // label, even though it is correctly shaped.
+      const streamDeck = await registerStreamDeck(port, token);
+      clients.push(streamDeck);
+
+      const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", {
+        B1: { label: "Fixture A" },
+        B2: { label: "Overflow" },
+      } as unknown as RegisterContent);
+      clients.push(app);
+
+      const [errorMessage] = await app.waitForMessageType("error");
+      const rejected = (
+        errorMessage.payload as { details: { rejectedContent: { label: string; reason: string }[] } }
+      ).details.rejectedContent;
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]?.label).toBe("B2");
+      expect(rejected[0]?.reason).toContain("out of range");
     });
   });
 

@@ -17,9 +17,10 @@ a host-side layout file to do.
 **Migration:** None needed.
 
 ### Requirement: Bindings Resolved By Plugin Type
-**Reason:** Resolution is now ordinal (position within a connection's own declared
-content), not a lookup by plugin type against a persisted file — see
-`profile-routing`'s revised "Input Event Resolution Against the Focused Connection."
+**Reason:** Resolution is now by fixed position label (derived from the device's
+physical capacity, looked up directly in a connection's own declared content), not a
+lookup by plugin type against a persisted file — see `profile-routing`'s revised
+"Input Event Resolution Against the Focused Connection."
 **Migration:** None needed; the replacement behavior is specified in `profile-routing`.
 
 ### Requirement: All Bound Positions Span Every Configured Profile

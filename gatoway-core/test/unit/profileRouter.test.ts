@@ -9,10 +9,10 @@ function fakeLogger(): Logger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
 }
 
-/** A single button + a single dial, at ordinal index 0 in each of their own arrays. */
+/** A single button + a single dial, at labels "B1"/"D1". */
 const CONTENT_ONE: RegisterContent = {
-  buttons: [{ label: "One", icon: "one.png" }],
-  dials: [{ label: "One", icon: "one.png" }],
+  B1: { label: "One", icon: "one.png" },
+  D1: { label: "One", icon: "one.png" },
 };
 
 const DEVICE_CAPACITY = {
@@ -22,10 +22,10 @@ const DEVICE_CAPACITY = {
 
 /**
  * A multi-position device capacity (QA-019): 3 button slots + 2 dial slots, so
- * overflow (a connection declaring more content entries than a controller has physical
- * positions for) and mixed populated/idle sweeps can actually be distinguished from the
- * single-position fixture above, which can't tell "no content" apart from "overflow
- * dropped" or "some slots idle, some populated" apart from "all slots the same".
+ * overflow (a connection declaring content for labels beyond physical capacity) and
+ * mixed populated/idle sweeps can actually be distinguished from the single-position
+ * fixture above, which can't tell "no content" apart from "overflow dropped" or "some
+ * slots idle, some populated" apart from "all slots the same".
  */
 const MULTI_DEVICE_CAPACITY = {
   buttonPositions: [
@@ -53,7 +53,7 @@ function registerStreamDeck(
 ) {
   const streamDeck = acceptConnection(manager, sent);
   manager.transition(streamDeck.id, "authenticated");
-  manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, { buttons: [], dials: [] });
+  manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, {});
   router.handleDeviceCapacity(streamDeck, capacity);
   return streamDeck;
 }
@@ -66,14 +66,14 @@ describe("ProfileRouter", () => {
       const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
       const streamDeck = acceptConnection(manager, []);
       manager.transition(streamDeck.id, "authenticated");
-      manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, { buttons: [], dials: [] });
+      manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, {});
 
       router.handleDeviceCapacity(streamDeck, DEVICE_CAPACITY);
 
       const sent: unknown[] = [];
       const receiver = manager.accept({ transport: "tcp", send: (m) => sent.push(m), close: vi.fn() });
       manager.transition(receiver.id, "authenticated");
-      manager.setPluginInfo(receiver.id, "test-app", { buttons: [], dials: [] });
+      manager.setPluginInfo(receiver.id, "test-app", {});
       router.handleRegistered(receiver);
 
       expect(sent).toEqual([
@@ -87,19 +87,32 @@ describe("ProfileRouter", () => {
       const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
       const app = acceptConnection(manager, []);
       manager.transition(app.id, "authenticated");
-      manager.setPluginInfo(app.id, "test-app", { buttons: [], dials: [] });
+      manager.setPluginInfo(app.id, "test-app", {});
 
       router.handleDeviceCapacity(app, DEVICE_CAPACITY);
 
       const receiverSent: unknown[] = [];
       const receiver = manager.accept({ transport: "tcp", send: (m) => receiverSent.push(m), close: vi.fn() });
       manager.transition(receiver.id, "authenticated");
-      manager.setPluginInfo(receiver.id, "test-app-2", { buttons: [], dials: [] });
+      manager.setPluginInfo(receiver.id, "test-app-2", {});
       router.handleRegistered(receiver);
 
       expect(receiverSent).toEqual([
         { type: "slot_capacity", connectionId: receiver.id, payload: { buttonSlots: 0, dialSlots: 0 } },
       ]);
+    });
+  });
+
+  describe("getSlotCapacity", () => {
+    it("reflects the most recent device_capacity report", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
+      expect(router.getSlotCapacity()).toEqual({ buttonSlots: 0, dialSlots: 0 });
+
+      registerStreamDeck(router, manager, [], MULTI_DEVICE_CAPACITY);
+
+      expect(router.getSlotCapacity()).toEqual({ buttonSlots: 3, dialSlots: 2 });
     });
   });
 
@@ -142,7 +155,7 @@ describe("ProfileRouter", () => {
       expect(appSent.filter((m) => (m as { type: string }).type === "command")).toEqual([]);
     });
 
-    it("ignores an input_event when the focused connection's content has no entry at that ordinal index (underflow)", () => {
+    it("ignores an input_event when the focused connection's content has no entry for the resolved label (underflow)", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const focusTracker = new FocusTracker(logger);
@@ -152,8 +165,8 @@ describe("ProfileRouter", () => {
       const app = acceptConnection(manager, appSent);
       manager.transition(app.id, "authenticated");
       // Declares no content at all - the device has a button/dial slot, but this
-      // connection's own content is shorter (underflow, expected per FR-007).
-      manager.setPluginInfo(app.id, "test-app", { buttons: [], dials: [] });
+      // connection's own content is missing that label (underflow, expected per FR-007).
+      manager.setPluginInfo(app.id, "test-app", {});
       focusTracker.reportFocus(app.id, true);
 
       router.handleInputEvent(streamDeck, {
@@ -165,7 +178,7 @@ describe("ProfileRouter", () => {
       expect(appSent.filter((m) => (m as { type: string }).type === "command")).toEqual([]);
     });
 
-    it("resolves an input_event against the focused connection's declared content and sends a command with its ordinal slotIndex", () => {
+    it("resolves an input_event against the focused connection's declared content and sends a command with its fixed label", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const focusTracker = new FocusTracker(logger);
@@ -187,12 +200,12 @@ describe("ProfileRouter", () => {
         {
           type: "command",
           connectionId: app.id,
-          payload: { controller: "keypad", slotIndex: 0, eventType: "keyDown", delta: undefined },
+          payload: { label: "B1", eventType: "keyDown", delta: undefined },
         },
       ]);
     });
 
-    it("resolves a dial rotation against content.dials, carrying delta through", () => {
+    it("resolves a dial rotation against the focused connection's content, carrying delta through", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const focusTracker = new FocusTracker(logger);
@@ -215,7 +228,7 @@ describe("ProfileRouter", () => {
         {
           type: "command",
           connectionId: app.id,
-          payload: { controller: "encoder", slotIndex: 0, eventType: "rotate", delta: 3 },
+          payload: { label: "D1", eventType: "rotate", delta: 3 },
         },
       ]);
     });
@@ -275,8 +288,8 @@ describe("ProfileRouter", () => {
       const appB = acceptConnection(manager, []);
       manager.transition(appB.id, "authenticated");
       manager.setPluginInfo(appB.id, "test-app-b", {
-        buttons: [{ label: "No Icon" }],
-        dials: [{ label: "No Icon" }],
+        B1: { label: "No Icon" },
+        D1: { label: "No Icon" },
       });
       router.handleFocus(appB, { focused: true });
 
@@ -299,7 +312,7 @@ describe("ProfileRouter", () => {
       }
     });
 
-    it("sweeps a physical position to idle when the focused connection's content is shorter than device capacity", () => {
+    it("sweeps a physical position to idle when the focused connection's content has no entry for its label", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const focusTracker = new FocusTracker(logger);
@@ -311,7 +324,7 @@ describe("ProfileRouter", () => {
       const app = acceptConnection(manager, []);
       manager.transition(app.id, "authenticated");
       // Declares no content at all - both physical positions should sweep to idle.
-      manager.setPluginInfo(app.id, "test-app", { buttons: [], dials: [] });
+      manager.setPluginInfo(app.id, "test-app", {});
 
       router.handleFocus(app, { focused: true });
 
@@ -414,7 +427,7 @@ describe("ProfileRouter", () => {
       const sent: unknown[] = [];
       const app = acceptConnection(manager, sent);
       manager.transition(app.id, "authenticated");
-      manager.setPluginInfo(app.id, "some-other-app", { buttons: [], dials: [] });
+      manager.setPluginInfo(app.id, "some-other-app", {});
 
       router.handleRegistered(app);
 
@@ -425,7 +438,7 @@ describe("ProfileRouter", () => {
   });
 
   describe("overflow / multi-position mixed sweep (QA-019)", () => {
-    it("never renders or resolves past device capacity when a connection declares more content entries than physical slots (overflow)", () => {
+    it("never renders or resolves past device capacity when a connection declares content for labels beyond physical slots (overflow)", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const focusTracker = new FocusTracker(logger);
@@ -434,26 +447,22 @@ describe("ProfileRouter", () => {
       const streamDeck = registerStreamDeck(router, manager, streamDeckSent, MULTI_DEVICE_CAPACITY);
       streamDeckSent.length = 0;
 
-      // 5 button entries and 4 dial entries declared, but the device only has 3 button
-      // slots and 2 dial slots - the entries beyond capacity (index 3+ for buttons,
-      // index 2+ for dials) have no physical position and must never be rendered.
+      // 5 button labels and 4 dial labels declared, but the device only has 3 button
+      // slots ("B1".."B3") and 2 dial slots ("D1"/"D2") - the labels beyond capacity
+      // ("B4", "B5", "D3", "D4") have no physical position and must never be rendered.
       const appSent: unknown[] = [];
       const app = acceptConnection(manager, appSent);
       manager.transition(app.id, "authenticated");
       manager.setPluginInfo(app.id, "test-app", {
-        buttons: [
-          { label: "Button 0" },
-          { label: "Button 1" },
-          { label: "Button 2" },
-          { label: "Button 3 (overflow)" },
-          { label: "Button 4 (overflow)" },
-        ],
-        dials: [
-          { label: "Dial 0" },
-          { label: "Dial 1" },
-          { label: "Dial 2 (overflow)" },
-          { label: "Dial 3 (overflow)" },
-        ],
+        B1: { label: "Button 0" },
+        B2: { label: "Button 1" },
+        B3: { label: "Button 2" },
+        B4: { label: "Button 3 (overflow)" },
+        B5: { label: "Button 4 (overflow)" },
+        D1: { label: "Dial 0" },
+        D2: { label: "Dial 1" },
+        D3: { label: "Dial 2 (overflow)" },
+        D4: { label: "Dial 3 (overflow)" },
       });
 
       router.handleFocus(app, { focused: true });
@@ -487,7 +496,7 @@ describe("ProfileRouter", () => {
         {
           type: "command",
           connectionId: app.id,
-          payload: { controller: "keypad", slotIndex: 2, eventType: "keyDown", delta: undefined },
+          payload: { label: "B3", eventType: "keyDown", delta: undefined },
         },
       ]);
     });
@@ -501,14 +510,15 @@ describe("ProfileRouter", () => {
       registerStreamDeck(router, manager, streamDeckSent, MULTI_DEVICE_CAPACITY);
       streamDeckSent.length = 0;
 
-      // Declares fewer entries than physical capacity for both controllers: 2 of 3
-      // button slots and 1 of 2 dial slots get real content; the rest must fall back to
-      // the idle appearance in the very same sweep.
+      // Declares fewer labels than physical capacity for both controllers: 2 of 3
+      // button slots ("B1"/"B2") and 1 of 2 dial slots ("D1") get real content; the
+      // rest must fall back to the idle appearance in the very same sweep.
       const app = acceptConnection(manager, []);
       manager.transition(app.id, "authenticated");
       manager.setPluginInfo(app.id, "test-app", {
-        buttons: [{ label: "Button 0", icon: "b0.png" }, { label: "Button 1", icon: "b1.png" }],
-        dials: [{ label: "Dial 0" }],
+        B1: { label: "Button 0", icon: "b0.png" },
+        B2: { label: "Button 1", icon: "b1.png" },
+        D1: { label: "Dial 0" },
       });
 
       router.handleFocus(app, { focused: true });
@@ -523,8 +533,8 @@ describe("ProfileRouter", () => {
       expect(keypadUpdates).toHaveLength(3);
       expect(keypadUpdates[0]!.payload).toMatchObject({ label: "Button 0", icon: "b0.png" });
       expect(keypadUpdates[1]!.payload).toMatchObject({ label: "Button 1", icon: "b1.png" });
-      // The third button position has no declared entry - idle, in the same sweep as
-      // the two populated positions above (not a separate all-idle sweep).
+      // The third button position ("B3") has no declared entry - idle, in the same
+      // sweep as the two populated positions above (not a separate all-idle sweep).
       expect(keypadUpdates[2]!.payload).toMatchObject({ label: "Gatoway", icon: null });
 
       expect(encoderUpdates).toHaveLength(2);
@@ -550,8 +560,8 @@ describe("ProfileRouter", () => {
       streamDeckSent.length = 0;
 
       manager.setPluginInfo(app.id, "test-app", {
-        buttons: [{ label: "Two", icon: "two.png" }],
-        dials: [{ label: "Two", icon: "two.png" }],
+        B1: { label: "Two", icon: "two.png" },
+        D1: { label: "Two", icon: "two.png" },
       });
       router.handleRegistered(app);
 

@@ -2,6 +2,7 @@ import type {
   DeviceCapacityPayload,
   FocusPayload,
   InputEventPayload,
+  SlotCapacityPayload,
 } from "../protocol/messages.js";
 import type { ConnectionRecord } from "./types.js";
 
@@ -34,4 +35,12 @@ export interface ProtocolRouter {
    * connection - rejected/ignored from any other connection.
    */
   handleDeviceCapacity(connection: ConnectionRecord, payload: DeviceCapacityPayload): void;
+  /**
+   * Returns the current button/dial slot counts, derived from the most recently
+   * reported `device_capacity` (design.md D2/D4, amended v1.7 for QA-020): both zero if
+   * none has ever been received. `messageHandler.ts` uses this at `register` time to
+   * validate that each declared content-map key is a currently-valid label for the
+   * device's actual capacity, not just correctly value-shaped.
+   */
+  getSlotCapacity(): SlotCapacityPayload;
 }

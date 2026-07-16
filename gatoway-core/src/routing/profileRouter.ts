@@ -11,9 +11,9 @@ import type {
   FocusPayload,
   InputEventPayload,
   Position,
+  RegisterContent,
   RenderUpdatePayload,
   SlotCapacityPayload,
-  SlotContent,
 } from "../protocol/messages.js";
 import { samePosition } from "./position.js";
 
@@ -40,16 +40,20 @@ export interface ProfileRouterOptions {
 
 /**
  * Implements the `profile-routing`/`stream-deck-core-lifecycle` capabilities
- * (extension-provided-slot-content design.md D1-D6): tracks the Stream Deck plugin's
- * latest live slot-capacity report, resolves incoming `input_event`s against the
- * currently-focused connection's own declared, ordinally-addressed content, keeps the
- * Stream Deck plugin's display in sync with focus changes and live content updates
- * (re-sent `register`), and delivers `slot_capacity` to each application plugin at
- * connection time and on every focus gain.
+ * (extension-provided-slot-content design.md D1-D6, amended v1.7 for QA-020): tracks
+ * the Stream Deck plugin's latest fixed device-capacity report, resolves incoming
+ * `input_event`s against the currently-focused connection's own declared,
+ * label-addressed content, keeps the Stream Deck plugin's display in sync with focus
+ * changes and live content updates (re-sent `register`), and delivers `slot_capacity`
+ * to each application plugin at connection time and on every focus gain.
  *
  * Gatoway core has no semantic understanding of what any entry means (AD-8 revised) -
- * only which physical position an ordinal index maps to (via the latest
- * `device_capacity` report) and which connection's content is currently displayed.
+ * only which physical position a fixed label (`"B1"`, `"D1"`, ...) maps to (via the
+ * latest `device_capacity` report) and which connection's content is currently
+ * displayed. Labels are derived from `device_capacity`'s position-list index
+ * (`buttonPositions[i]` -> `"B" + (i+1)`, `dialPositions[i]` -> `"D" + (i+1)`) - never
+ * from live placement, which is what v1.6's superseded ordinal-index model conflated
+ * (QA-020).
  */
 export class ProfileRouter implements ProtocolRouter {
   private readonly manager: ConnectionManager;
@@ -142,13 +146,14 @@ export class ProfileRouter implements ProtocolRouter {
   }
 
   /**
-   * Resolves an `input_event` (design.md D6): maps its reported physical position to an
-   * ordinal index via the latest `device_capacity` report for the matching controller
-   * type, then checks whether the focused connection's own declared content has an
-   * entry at that index. Safely logs and drops at every unresolvable step - no
-   * connection focused, position not in the latest capacity report, or the focused
-   * connection's content shorter than physical capacity (underflow) - never errors or
-   * crashes (profile-routing spec).
+   * Resolves an `input_event` (design.md D6, amended v1.7 for QA-020): maps its
+   * reported physical position to its fixed label via the latest `device_capacity`
+   * report for the matching controller type (`buttonPositions[i]` -> `"B" + (i+1)`,
+   * `dialPositions[i]` -> `"D" + (i+1)`), then checks whether the focused connection's
+   * own declared `content` map has an entry for that label. Safely logs and drops at
+   * every unresolvable step - no connection focused, position not in the latest
+   * capacity report, or the focused connection's content has no entry for that label
+   * (underflow) - never errors or crashes (profile-routing spec).
    */
   handleInputEvent(connection: ConnectionRecord, payload: InputEventPayload): void {
     const focusedId = this.focusTracker.current;
@@ -183,8 +188,8 @@ export class ProfileRouter implements ProtocolRouter {
     }
 
     const positions = this.positionsFor(payload.controller);
-    const slotIndex = positions.findIndex((position) => samePosition(position, payload.position));
-    if (slotIndex === -1) {
+    const index = positions.findIndex((position) => samePosition(position, payload.position));
+    if (index === -1) {
       this.logger.info(
         {
           event: "input_event_ignored",
@@ -198,24 +203,23 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
 
-    const entries = this.entriesFor(focusedConnection, payload.controller);
-    if (!entries[slotIndex]) {
+    const label = this.labelFor(payload.controller, index);
+    const content = focusedConnection.content ?? {};
+    if (!content[label]) {
       this.logger.info(
         {
           event: "input_event_ignored",
-          reason: "no_content_at_index",
+          reason: "no_content_at_label",
           focusedConnectionId: focusedId,
-          controller: payload.controller,
-          slotIndex,
+          label,
         },
-        "ignoring input_event: focused connection has no declared content at this ordinal index",
+        "ignoring input_event: focused connection has no declared content at this label",
       );
       return;
     }
 
     const commandPayload: CommandPayload = {
-      controller: payload.controller,
-      slotIndex,
+      label,
       eventType: payload.eventType,
       delta: payload.delta,
     };
@@ -232,23 +236,29 @@ export class ProfileRouter implements ProtocolRouter {
       : this.latestCapacity.dialPositions;
   }
 
-  private entriesFor(connection: ConnectionRecord, controller: Controller): SlotContent[] {
-    const content = connection.content;
-    if (!content) {
-      return [];
-    }
-    return controller === "keypad" ? content.buttons : content.dials;
+  /**
+   * Derives a physical position's fixed label from its controller type and 0-based
+   * index within the latest `device_capacity` report (design.md D1/D6, amended v1.7 for
+   * QA-020): `"B" + (index + 1)` for a button, `"D" + (index + 1)` for a dial. The
+   * inverse of `slotContentValidation.ts`'s `parseLabel`.
+   */
+  private labelFor(controller: Controller, index: number): string {
+    return (controller === "keypad" ? "B" : "D") + (index + 1);
   }
 
-  private sendSlotCapacity(connection: ConnectionRecord): void {
-    const payload: SlotCapacityPayload = {
+  /** Returns the current button/dial slot counts, per `ProtocolRouter.getSlotCapacity`. */
+  getSlotCapacity(): SlotCapacityPayload {
+    return {
       buttonSlots: this.latestCapacity.buttonPositions.length,
       dialSlots: this.latestCapacity.dialPositions.length,
     };
+  }
+
+  private sendSlotCapacity(connection: ConnectionRecord): void {
     sendMessage(connection, this.logger, {
       type: "slot_capacity",
       connectionId: connection.id,
-      payload,
+      payload: this.getSlotCapacity(),
     });
   }
 
@@ -282,38 +292,31 @@ export class ProfileRouter implements ProtocolRouter {
   }
 
   /**
-   * Renders the focused connection's declared content (design.md D6): for each ordinal
-   * index present in `content.buttons`/`content.dials`, looks up the corresponding
-   * physical position from the latest `device_capacity` report and sends a
-   * `render_update` for it. Any remaining physical position, up to full device
-   * capacity, is swept to the idle appearance - mirroring the old layout-based idle
-   * sweep, just driven by array length instead of a missing binding.
+   * Renders the focused connection's declared content (design.md D6, amended v1.7 for
+   * QA-020): for each physical position, derives its fixed label and looks it up
+   * directly in the focused connection's `content` map. Any physical position whose
+   * label is absent from that map is swept to the idle appearance - mirroring the old
+   * array-underflow idle sweep, just driven by map-key presence instead of array length.
    */
   private sendBoundContentSweep(
     streamDeckConnection: ConnectionRecord,
     focusedConnectionId: string,
   ): void {
     const focusedConnection = this.manager.get(focusedConnectionId);
-    this.sendContentSweepForController(
-      streamDeckConnection,
-      "keypad",
-      focusedConnection?.content?.buttons ?? [],
-    );
-    this.sendContentSweepForController(
-      streamDeckConnection,
-      "encoder",
-      focusedConnection?.content?.dials ?? [],
-    );
+    const content = focusedConnection?.content ?? {};
+    this.sendContentSweepForController(streamDeckConnection, "keypad", content);
+    this.sendContentSweepForController(streamDeckConnection, "encoder", content);
   }
 
   private sendContentSweepForController(
     streamDeckConnection: ConnectionRecord,
     controller: Controller,
-    entries: SlotContent[],
+    content: RegisterContent,
   ): void {
     const positions = this.positionsFor(controller);
     positions.forEach((position, index) => {
-      const entry = entries[index];
+      const label = this.labelFor(controller, index);
+      const entry = content[label];
       const payload: RenderUpdatePayload = entry
         ? {
             controller,

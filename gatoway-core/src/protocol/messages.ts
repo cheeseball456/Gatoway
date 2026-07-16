@@ -4,19 +4,22 @@
  * `command` were added by `focus-profile-routing` (design.md D1) to implement AD-7
  * (self-reported focus) and AD-8 (generic, position-based action model).
  *
- * `extension-provided-slot-content` (design.md D1-D6) replaces the old `Capability`/
- * `capability_update`/`capabilityId` model entirely: a plugin's declared content is now
- * two ordered, position-agnostic arrays (`SlotContent[]`), addressed only by ordinal
- * index, never by a plugin-chosen id. Gatoway core also now tracks live slot capacity
- * (`device_capacity`/`slot_capacity`) instead of resolving positions against a
- * persisted, host-side layout file - see `gatoway-core/src/routing/profileRouter.ts`.
+ * `extension-provided-slot-content` (design.md D1-D6, amended v1.7 for QA-020) replaces
+ * the old `Capability`/`capability_update`/`capabilityId` model entirely: a plugin's
+ * declared content is a flat map keyed by a fixed, stable position label (`"B1"`,
+ * `"D1"`, ...), derived from the connected device's fixed physical capacity - never by
+ * an ordinal array index (v1.6's superseded model, which conflated physical capacity
+ * with live placement - see QA-020) or a plugin-chosen id. Gatoway core also tracks the
+ * device's fixed slot capacity (`device_capacity`/`slot_capacity`) instead of resolving
+ * positions against a persisted, host-side layout file - see
+ * `gatoway-core/src/routing/profileRouter.ts`.
  */
 
 /**
  * A single item of content (button or dial) a plugin currently wants displayed at one
- * ordinal position within one control type (design.md D3). Addressed only by its
- * position within `RegisterContent.buttons`/`RegisterContent.dials` - never by an id,
- * since Gatoway core never needs to look this up by anything other than position.
+ * fixed, physical-position label (design.md D3, e.g. `"B1"`, `"D1"`). Addressed only by
+ * its key within `RegisterContent` - never by an id, since Gatoway core never needs to
+ * look this up by anything other than that label.
  */
 export interface SlotContent {
   /**
@@ -34,17 +37,18 @@ export interface SlotContent {
 }
 
 /**
- * The full, ordinal-addressed content a connection currently wants displayed (design.md
- * D3): `content.buttons[N]` fills the Nth position in the Stream Deck plugin's latest
- * `device_capacity.buttonPositions` report; `content.dials[N]` fills the Nth position in
- * `dialPositions`. Neither array carries any semantic id - "which array, which index" is
- * the entirety of how an entry is addressed, both at registration and later in a
- * resolved `command`.
+ * The full, label-addressed content a connection currently wants displayed (design.md
+ * D3, amended v1.7): a flat map keyed by fixed position label (`"B1"`, `"B2"`, ...,
+ * `"D1"`, ...) - a label's own `B`/`D` prefix identifies which physical control type it
+ * addresses, so there is no need for separate `buttons`/`dials` containers (v1.6's
+ * superseded shape). A label always corresponds to the same physical position for as
+ * long as the connected device itself doesn't change (AD-9) - never to a live
+ * placement-derived ordinal index (QA-020). A plugin need not declare every label a
+ * device's current `slot_capacity` makes available: an omitted label simply isn't
+ * rendered at that physical position, exactly mirroring the old array-underflow
+ * behavior.
  */
-export interface RegisterContent {
-  buttons: SlotContent[];
-  dials: SlotContent[];
-}
+export type RegisterContent = Record<string, SlotContent>;
 
 /**
  * Sent by a plugin to authenticate and declare its displayed content.
@@ -77,7 +81,10 @@ export interface ErrorPayload {
 
 /**
  * Which physical control surface an `input_event`/`render_update` addresses (design.md
- * D1, AD-8). Position-addressed only - never app- or command-specific.
+ * D1, AD-8). Position-addressed only - never app- or command-specific. Still used for
+ * `input_event`/`render_update`, which remain physical-position addressed (the Stream
+ * Deck plugin still deals in real physical positions, not labels) - see `CommandPayload`
+ * for the label-addressed shape resolved *from* a `Controller`+`Position` pair.
  */
 export type Controller = "keypad" | "encoder";
 
@@ -144,32 +151,41 @@ export interface RenderUpdatePayload {
 
 /**
  * Sent by Gatoway core to the currently-focused application connection once an
- * `input_event` has been resolved against an ordinal index within that connection's own
- * declared content (`extension-provided-slot-content` design.md D5/D6, profile-routing
- * spec: "Input Event Resolution Against the Focused Connection"). `slotIndex` identifies
- * the entry's position within `content.buttons` (`controller: "keypad"`) or
- * `content.dials` (`controller: "encoder"`) - Gatoway core carries no other meaning for
- * it. `eventType`/`delta` carry the same raw gesture information the originating
- * `input_event` reported.
+ * `input_event` has been resolved against a fixed label within that connection's own
+ * declared content (`extension-provided-slot-content` design.md D5/D6, amended v1.7,
+ * profile-routing spec: "Input Event Resolution Against the Focused Connection").
+ * `label` identifies the entry within the focused connection's own `content` map (e.g.
+ * `"B3"`, `"D1"`) - Gatoway core carries no other meaning for it. There is no separate
+ * `controller` field (dropped in v1.7, superseding the `{ controller, slotIndex }`
+ * shape): the label's own prefix (`B` for button, `D` for dial) already conveys the
+ * controller type, so carrying both would be redundant. `eventType`/`delta` carry the
+ * same raw gesture information the originating `input_event` reported.
  */
 export interface CommandPayload {
-  controller: Controller;
-  slotIndex: number;
+  label: string;
   eventType: InputEventType;
   delta?: number;
 }
 
 /**
  * Sent by the Stream Deck plugin connection (and only that connection - design.md D1)
- * reporting the connected device's live slot capacity: the ordered list of physical
- * positions currently holding a generic Key action, and the ordered list currently
- * holding a generic Dial action. Sent once at that connection's own registration, and
- * again any time the set of placed generic actions changes.
+ * reporting the connected device's **fixed physical layout** (amended v1.7, superseding
+ * v1.6's live-placement report - see QA-020): the ordered list of physical button
+ * positions (`buttonPositions`) and the ordered list of physical dial positions
+ * (`dialPositions`), derived from the device's actual hardware capacity
+ * (`Device.size`/`Device.type`) - never from which positions currently have a generic
+ * Key/Dial action placed on them. Sent once at that connection's own registration, and
+ * again only if the connected device itself changes (connected, disconnected, or
+ * swapped for a different model) - placing or removing a generic action does *not*
+ * trigger a new report, since physical capacity hasn't changed.
  *
- * Order within each list must be stable and deterministic so that ordinal index N
- * consistently means the same physical position across repeated reports, until capacity
- * actually changes - see `stream-deck-plugin/src/coreClient/deviceCapacity.ts` for the
- * Stream Deck plugin's own chosen ordering rule.
+ * Order within each list must be stable and deterministic, since Gatoway core derives
+ * each position's fixed label directly from its index in these lists
+ * (`buttonPositions[0]` is `"B1"`, `buttonPositions[1]` is `"B2"`, ..., `dialPositions[0]`
+ * is `"D1"`, and so on) - see `stream-deck-plugin/src/coreClient/deviceCapacity.ts` for
+ * the Stream Deck plugin's own chosen ordering rule. Because this is now derived from
+ * fixed hardware facts rather than live placement, the order no longer shuffles due to
+ * unrelated placement changes - only a genuine device change ever changes it.
  */
 export interface DeviceCapacityPayload {
   buttonPositions: Position[];
@@ -178,11 +194,13 @@ export interface DeviceCapacityPayload {
 
 /**
  * Sent by Gatoway core to an application plugin, reporting how many button/dial slots
- * are currently available - bare counts only, derived from the most recent
- * `device_capacity` report (design.md D2). An application plugin has no use for actual
- * physical positions, only how many slots of each type it has to fill. Sent once
- * immediately after that connection's own successful `register_ack`, and again every
- * time Gatoway core records that connection as newly focused.
+ * the connected device physically has - bare counts only, derived from the most recent
+ * `device_capacity` report (design.md D2). An application plugin derives its own valid
+ * label set (`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using
+ * the documented labeling convention; the actual label strings are never enumerated
+ * over the wire, since both sides derive them identically from the same counts. Sent
+ * once immediately after that connection's own successful `register_ack`, and again
+ * every time Gatoway core records that connection as newly focused.
  */
 export interface SlotCapacityPayload {
   buttonSlots: number;

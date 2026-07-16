@@ -1,21 +1,32 @@
 # Gatoway Message Protocol Reference
 
 Covers the full message contract as of `extension-provided-slot-content`, which replaced
-the earlier `Capability`/`capability_update`/`capabilityId` model with ordinal,
-position-agnostic `content` plus live slot-capacity reporting (`device_capacity`/
-`slot_capacity`). If you are writing a new application plugin (following Lightroom or
-xDesign), this document should be the only thing you need to read to speak Gatoway's
-wire protocol — you should not need to read Gatoway core's source. Kept in sync with
-`gatoway-core/src/protocol/messages.ts`, the single source of truth for these shapes; if
-the two ever disagree, the source wins and this document is stale.
+the earlier `Capability`/`capability_update`/`capabilityId` model with `content`
+addressed by a fixed, stable position label (`"B1"`, `"D1"`, ...), plus device-capacity
+reporting (`device_capacity`/`slot_capacity`). If you are writing a new application
+plugin (following Lightroom or xDesign), this document should be the only thing you need
+to read to speak Gatoway's wire protocol — you should not need to read Gatoway core's
+source. Kept in sync with `gatoway-core/src/protocol/messages.ts`, the single source of
+truth for these shapes; if the two ever disagree, the source wins and this document is
+stale.
+
+**Amended (v1.7, QA-020):** content is addressed by a *fixed, stable label* derived from
+the device's actual physical hardware capacity (a `B`/`D` prefix plus a 1-based
+ordinal — e.g. `"B1"`, `"D2"`) — never by an ordinal array index resolved against
+whichever positions currently happen to have a generic action placed on them. The
+distinction matters: an ordinal-index model would let the same physical button mean a
+different index depending on unrelated placement changes elsewhere on the device; a
+fixed label always means the same physical position for as long as the connected device
+itself doesn't change. See [Slot capacity and label-addressed content](#slot-capacity-and-label-addressed-content)
+below.
 
 Speaking the wire protocol correctly is now also *sufficient* to see something render —
 unlike the old model, there is no separate, host-side layout/config file to hand-author
 in addition to this wire contract. Gatoway core tells each application plugin how many
-button/dial slots are currently available (`slot_capacity`, derived from the Stream Deck
-plugin's own live `device_capacity` report) and renders whatever ordered content that
-plugin declares directly against those slots, addressed purely by ordinal position — see
-[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) below.
+button/dial slots the connected device physically has (`slot_capacity`, derived from the
+Stream Deck plugin's own `device_capacity` report of its fixed hardware layout) and
+renders whatever content that plugin declares directly against the corresponding
+physical positions, addressed purely by fixed label.
 
 ## Transport and framing
 
@@ -80,11 +91,8 @@ displayed content.
   "type": "register",
   "payload": {
     "pluginType": "lightroom",       // string, required: identifies the kind of plugin
-    "content": {                     // RegisterContent, optional (each array defaults to [])
-      "buttons": [
-        { "label": "Next Photo" }
-      ],
-      "dials": []
+    "content": {                     // RegisterContent, optional (defaults to {})
+      "B1": { "label": "Next Photo" }
     },
     "token": "…"                     // string, required for TCP; omitted for WebSocket
   }
@@ -120,7 +128,7 @@ displayed content.
 - Sending `register` again on an already-authenticated connection re-declares its
   content without repeating the credential check. Omitting `content` on a
   re-registration leaves the previously-declared content unchanged; an explicit
-  `content` (including empty arrays) always replaces it. **This is the only mechanism
+  `content` (including an empty map) always replaces it. **This is the only mechanism
   for any content change** — a live label/state update, paging to a different subset,
   or entering/leaving a nested group — there is no separate, lighter-weight update
   message; a plugin always re-sends its complete, current `content`. This is distinct
@@ -134,38 +142,40 @@ displayed content.
   `render_update` to, and which declares no `content` of its own). It is never used as,
   or derived from, the connection's unique ID — multiple simultaneous connections may
   share the same `pluginType`.
-- **Each `content.buttons`/`content.dials` entry is validated against the
-  `SlotContent` shape below.** An entry that fails validation (e.g. a missing `label`,
-  or a `state` field on a dial entry) is *dropped* from its own array — it does **not**
-  fail the whole registration. The connection still authenticates and registers
-  successfully with whatever valid entries remain (even if that's none of them), and
-  Gatoway core sends a follow-up [`error`](#error-either-direction) message afterward
-  (after `register_ack`) identifying which entries were rejected and why. See
+- **Each `content` map entry is validated by both its key and its value.** The *key*
+  (the label itself, e.g. `"B1"`) must match the `B<n>`/`D<n>` convention *and* be
+  in-range for the most recently reported device capacity — an unrecognized or
+  out-of-range label is itself a rejection reason. The *value* is validated against the
+  `SlotContent` shape below (e.g. a missing `label`, or a `state` field on a
+  `D`-prefixed entry). An entry that fails either check is *dropped* from the map — it
+  does **not** fail the whole registration. The connection still authenticates and
+  registers successfully with whatever valid entries remain (even if that's none of
+  them), and Gatoway core sends a follow-up [`error`](#error-either-direction) message
+  afterward (after `register_ack`) identifying which entries were rejected and why. See
   [Content validation errors](#content-validation-errors) below for the exact shape.
 
 #### `RegisterContent` / `SlotContent`
 
 ```ts
-interface RegisterContent {
-  buttons: SlotContent[];   // defaults to [] if omitted
-  dials: SlotContent[];     // defaults to [] if omitted
-}
+type RegisterContent = Record<string, SlotContent>; // keyed by label, e.g. "B1", "D1"; defaults to {} if omitted
 
 interface SlotContent {
   icon?: string;    // string if present — register-time `icon` does not accept `null`
   label: string;    // non-empty; human-readable name
-  state?: number;   // buttons only — a dial (content.dials) entry with `state` is rejected
+  state?: number;   // buttons only — a state field under a "D"-prefixed key is rejected
 }
 ```
 
-**No `id` field, and no `type` field on each entry.** Nothing addresses a `SlotContent`
-entry by identity — only by its ordinal position within its own array
-(`content.buttons[0]`, `content.buttons[1]`, …). Which array an entry lives in *is* its
-type, so there is no separate `type` field either — the old `Capability.id`/`.type`
-fields (and `.description`, which carried no rendering behavior) are gone entirely.
-Gatoway core never stores or looks up anything by a plugin-chosen string; see
-[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) below for how
-this ordinal addressing actually resolves to a physical position.
+**Labels: a `B`/`D` prefix plus a 1-based ordinal.** `"B1"`, `"B2"`, ... address button
+(keypad) positions; `"D1"`, `"D2"`, ... address dial (encoder) positions — the prefix
+itself conveys the controller type, so there is no separate `type` field on each entry.
+A label is derived from, and always corresponds to, the device's actual physical layout
+(see [Slot capacity and label-addressed content](#slot-capacity-and-label-addressed-content)
+below) — never from live placement or any plugin-chosen identifier. **No `id` field
+either** — the label *is* the address; nothing else identifies an entry. The old
+`Capability.id`/`.type` fields (and `.description`, which carried no rendering behavior)
+are gone entirely. Gatoway core never stores or looks up anything by a plugin-chosen
+string.
 
 `icon` here is a plain optional string, not the `string | null | undefined` three-way
 distinction `render_update` uses on the wire (see below) — declaring fresh `content`
@@ -223,10 +233,10 @@ connection, not just the one you're currently waiting on.
 
 #### Content validation errors
 
-A `register` with one or more malformed `content.buttons`/`content.dials` entries
-produces a follow-up `error` message with structured `details`, always sent *after*
-`register_ack` — the connection itself was never at fault, so authentication/storage
-proceeds normally; only the specific rejected entry is reported separately (see
+A `register` with one or more invalid `content` map entries produces a follow-up
+`error` message with structured `details`, always sent *after* `register_ack` — the
+connection itself was never at fault, so authentication/storage proceeds normally; only
+the specific rejected entry is reported separately (see
 [`RegisterContent`/`SlotContent`](#registercontent--slotcontent) above for the shape
 being validated against):
 
@@ -238,19 +248,21 @@ being validated against):
     "message": "one or more declared content entries were invalid and have been dropped from the connection's content",
     "details": {
       "rejectedContent": [
-        { "controller": "keypad", "index": 2, "reason": "\"label\" must be a non-empty string" }
+        { "label": "B2", "reason": "\"label\" must be a non-empty string" }
       ]
     }
   }
 }
 ```
 
-`controller` (`"keypad"` for a `content.buttons` entry, `"encoder"` for a
-`content.dials` entry) plus `index` — the entry's position within that array as sent
-(0-based) — together identify the rejected entry; there is no `id` to report by, since
-none exists at this shape. Registration still succeeds with every *other*, validly-shaped
-entry in both arrays — even if every entry was rejected, the connection registers with
-empty content rather than failing outright.
+`label` — the map key the entry was declared under — identifies the rejected entry;
+there is no separate `id` to report by, since none exists at this shape. A `label` is
+reported as rejected either because its *value* failed the `SlotContent` shape check
+(as above), or because the *key itself* wasn't a currently-valid label at all — not
+matching the `B<n>`/`D<n>` convention, or out of range for the most recently reported
+device capacity (e.g. `"B5"` on a device with only 3 button slots). Registration still
+succeeds with every *other*, valid entry in the map — even if every entry was rejected,
+the connection registers with empty content rather than failing outright.
 
 ## Focus tracking
 
@@ -316,22 +328,34 @@ drop and reconnect often — a Manifest V3 browser extension's background servic
 being the prime example — since it means reconnect handling is just "repeat the normal
 startup sequence," not separate logic to write and maintain.
 
-## Slot capacity and ordinal content
+## Slot capacity and label-addressed content
 
 Gatoway core has no semantic understanding of what any application plugin's buttons or
 dials do — only what to display at a given physical slot, and which slot was just
 interacted with. Two message types make this possible: the Stream Deck plugin reports
-the device's live slot capacity as ordered *position lists* (`device_capacity`); Gatoway
-core forwards each application plugin just the *counts* (`slot_capacity`), and resolves
-that plugin's ordinally-addressed `content` (see [`register`](#register-plugin--core)
-above) against physical positions on its behalf.
+the connected device's **fixed physical layout** as ordered *position lists*
+(`device_capacity`); Gatoway core forwards each application plugin just the *counts*
+(`slot_capacity`), and resolves that plugin's label-addressed `content` (see
+[`register`](#register-plugin--core) above) against physical positions on its behalf.
+
+**Amended v1.7 (QA-020):** `device_capacity` now reports the device's fixed hardware
+capacity — its button grid dimensions and dial count, both static per-model facts —
+rather than which positions currently have a generic action placed on them. This
+directly yields the position lists that `"B1"`, `"B2"`, ..., `"D1"`, ... are derived
+from: `buttonPositions[0]` is `"B1"`, `buttonPositions[1]` is `"B2"`, ...,
+`dialPositions[0]` is `"D1"`, and so on (1-based numbering in the label, 0-based
+indexing into the array). Because this is now a fixed hardware fact instead of a
+live-placement snapshot, a label always means the same physical position for as long as
+the connected device itself doesn't change — placing or removing a generic Key/Dial
+action on the device has no effect on it at all.
 
 ### `device_capacity` (Stream Deck plugin → core)
 
 Sent only by the connection that registered as `pluginType: "stream-deck"` — rejected
 (logged, ignored) from any other connection. Reports the ordered list of physical
-positions currently holding a generic Key action, and the ordered list currently holding
-a generic Dial action.
+button positions and the ordered list of physical dial positions the connected device
+actually has, derived from its hardware (`Device.size`/`Device.type`) — never from which
+positions currently have a generic Key/Dial action placed on them.
 
 ```jsonc
 {
@@ -350,22 +374,30 @@ interface DeviceCapacityPayload {
 }
 ```
 
-- Sent once at the Stream Deck plugin connection's own registration, and again any time
-  the set of placed generic Key/Dial actions changes (an action added/removed, a device
-  connected/disconnected) — event-driven, not polled.
-- **Order matters and must be stable.** Ordinal index N in `buttonPositions`/
-  `dialPositions` is what an application plugin's `content.buttons[N]`/`content.dials[N]`
-  ultimately renders at. The Stream Deck plugin is responsible for establishing a
-  deterministic order itself (e.g. reading order for keys, ascending index for dials) —
-  see `stream-deck-plugin/src/coreClient/deviceCapacity.ts` for the actual rule it uses —
-  since the Elgato SDK's own `actions` iterator order is not documented as stable.
+- Sent once at the Stream Deck plugin connection's own registration, and again only if
+  the connected device itself changes — connected, disconnected, or swapped for a
+  different model. Placing or removing a generic Key/Dial action does **not** trigger a
+  new report, since the device's physical capacity hasn't changed — event-driven, not
+  polled, and no longer reacting to action-placement events at all (a real
+  simplification over the superseded v1.6 model, which listened for
+  `willAppear`/`willDisappear`).
+- **Order matters and must be stable.** Index N in `buttonPositions`/`dialPositions` is
+  what label `"B" + (N+1)` / `"D" + (N+1)` refers to. The Stream Deck plugin is
+  responsible for establishing a deterministic order itself (reading order for keys,
+  ascending index for dials) — see `stream-deck-plugin/src/coreClient/deviceCapacity.ts`
+  for the actual rule it uses. Since the lists are now derived from fixed hardware facts
+  rather than live placement, they no longer shuffle due to unrelated placement changes
+  — only a genuine device change ever changes them.
 - Gatoway core keeps only the **latest** report in memory. It is never persisted and
   never merged with a prior report — a fresh report fully replaces the previous one.
 
 ### `slot_capacity` (core → application plugin)
 
-Tells an application plugin how many button/dial slots it currently has to fill — bare
-counts only; an application plugin has no use for actual physical positions.
+Tells an application plugin how many button/dial slots the connected device physically
+has — bare counts only; an application plugin derives its own valid label set
+(`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using the labeling
+convention above. The actual label strings are never enumerated over the wire, since
+both sides derive them identically from the same counts.
 
 ```jsonc
 { "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": 2, "dialSlots": 1 } }
@@ -388,27 +420,27 @@ interface SlotCapacityPayload {
 
 ### How resolution actually works
 
-Gatoway core never needs to know both an ordinal index *and* a physical position for
-more than the instant it translates between them:
+Gatoway core never needs to know both a label *and* a physical position for more than
+the instant it translates between them:
 
 - **Input → command:** an `input_event`'s reported physical position is looked up in the
-  latest `device_capacity` report for the matching controller type, to find its ordinal
-  index N. Gatoway core then checks whether the *focused* connection's own
-  `content.buttons`/`content.dials` has an entry at index N. If so, that connection
-  receives a `command` naming ordinal index N (see [`command`](#command-core--focused-application-connection)
-  below). If the position isn't in the latest `device_capacity` report at all, or the
-  focused connection's content is shorter than physical capacity (underflow — entirely
-  expected, e.g. a plugin with only one button declared on a device with two button
-  slots), the event is safely logged and dropped, exactly as an unresolvable event always
-  has been.
+  latest `device_capacity` report for the matching controller type, to find its index N
+  and derive the corresponding label (`"B" + (N+1)` or `"D" + (N+1)`). Gatoway core then
+  checks whether the *focused* connection's own `content` map has an entry for that
+  label. If so, that connection receives a `command` naming the label (see
+  [`command`](#command-core--focused-application-connection) below). If the position
+  isn't in the latest `device_capacity` report at all, or the focused connection's
+  content has no entry for the resolved label (underflow — entirely expected, e.g. a
+  plugin declaring only `"B1"` on a device with two button slots), the event is safely
+  logged and dropped, exactly as an unresolvable event always has been.
 - **Content → render_update:** the reverse direction, whenever a connection's content is
   newly displayed (it gains focus, or re-registers while already focused). For each
-  ordinal index present in that connection's `content.buttons`/`content.dials`, Gatoway
-  core looks up the corresponding physical position from the latest `device_capacity`
-  report and sends a `render_update` for it. Any remaining physical position, up to full
-  device capacity, is swept to the idle appearance — this is what makes a plugin
-  declaring *fewer* entries than available slots (underflow) safe: the unused slots
-  simply show idle, not stale content from whatever was there before.
+  label present in that connection's `content` map, Gatoway core derives its
+  corresponding physical position from the latest `device_capacity` report (reversing
+  the label derivation above) and sends a `render_update` for it. Any remaining physical
+  position, up to full device capacity, is swept to the idle appearance — this is what
+  makes a plugin declaring *fewer* entries than available slots (underflow) safe: the
+  unused slots simply show idle, not stale content from whatever was there before.
 
 An application plugin with more content than it has slots for (or logically grouped
 content) manages its own paging/grouping and simply re-`register`s the right-sized subset
@@ -420,8 +452,8 @@ These three message types implement Gatoway's generic, position-based action mod
 the Stream Deck plugin has no knowledge of *what* a given key or dial means to any
 application — it only reports raw physical interactions and displays whatever it is
 told to. Gatoway core alone resolves "this position, while this application is
-focused" to an ordinal index within that connection's own declared content (see
-[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) above).
+focused" to a fixed label within that connection's own declared content (see
+[Slot capacity and label-addressed content](#slot-capacity-and-label-addressed-content) above).
 
 ### Position addressing
 
@@ -469,11 +501,11 @@ interface InputEventPayload {
 
 Gatoway core resolves every `input_event` against **the currently-focused connection's**
 own declared content at the reported position (never the sender's — the sender is
-always the Stream Deck plugin), via the ordinal-index resolution described in
+always the Stream Deck plugin), via the label resolution described in
 [How resolution actually works](#how-resolution-actually-works) above. If nothing is
 focused, the reported position isn't part of the current device capacity, or the
-focused connection's content has no entry at the resolved ordinal index, the event is
-silently logged and dropped — this is normal, expected behavior, not an error condition.
+focused connection's content has no entry for the resolved label, the event is silently
+logged and dropped — this is normal, expected behavior, not an error condition.
 
 ### `render_update` (core → Stream Deck plugin)
 
@@ -565,7 +597,7 @@ validation is built from):
 ### `command` (core → focused application connection)
 
 Sent to the currently-focused application connection once an `input_event` has been
-successfully resolved against an ordinal index within that connection's own declared
+successfully resolved against a fixed label within that connection's own declared
 content.
 
 ```jsonc
@@ -573,8 +605,7 @@ content.
   "type": "command",
   "connectionId": "<focused connection id>",
   "payload": {
-    "controller": "keypad",
-    "slotIndex": 0,
+    "label": "B1",
     "eventType": "keyDown"
     // "delta" is present only when the originating input_event was a "rotate"
   }
@@ -583,29 +614,30 @@ content.
 
 ```ts
 interface CommandPayload {
-  controller: Controller;
-  slotIndex: number;    // ordinal position within this connection's own content.buttons/content.dials
+  label: string;          // e.g. "B3", "D1" — the focused connection's own key into its declared content
   eventType: InputEventType;
-  delta?: number;         // carried through from the originating input_event, if present
+  delta?: number;          // carried through from the originating input_event, if present
 }
 ```
 
-`slotIndex` identifies the entry's position within the focused connection's own
-`content.buttons` (`controller: "keypad"`) or `content.dials` (`controller: "encoder"`)
-array, exactly as last declared via `register` — Gatoway core carries no other meaning
-for it, and there is no id to translate it back to; the application plugin itself
-already knows what it put at that index.
+`label` identifies the entry within the focused connection's own `content` map, exactly
+as last declared via `register` — Gatoway core carries no other meaning for it, and
+there is no id to translate it back to; the application plugin itself already knows
+what it put at that label. **There is no separate `controller` field** (dropped in
+v1.7, superseding the earlier `{ controller, slotIndex }` shape): the label's own prefix
+(`B` for button, `D` for dial) already conveys the controller type, so carrying both
+would be redundant.
 
 **Gesture timing is the receiving plugin's responsibility, not Gatoway's.** Neither
 Gatoway core nor the Stream Deck plugin does any debouncing or timing analysis — a
 `keyDown`/`keyUp` pair is forwarded as two separate `command` messages exactly as
 reported, and `CommandPayload` doesn't even carry a timestamp. This is deliberate, per
 AD-8: the Stream Deck plugin has zero app-specific knowledge, and Gatoway core's job
-stops at resolving position → ordinal index, never gesture semantics. So double-press
+stops at resolving position → label, never gesture semantics. So double-press
 detection, long-press detection, or distinguishing a quick tap from a held key is
 entirely up to the application plugin receiving the `command` messages — it must track
-its own event timestamps per `controller`/`slotIndex` pair across successive messages it
-receives. Gatoway does not, and will not, provide this itself.
+its own event timestamps per `label` across successive messages it receives. Gatoway
+does not, and will not, provide this itself.
 
 > **Implementation note:** this message type is not part of any design document's
 > original enumerated set of new message types for the change that introduced it
@@ -622,7 +654,7 @@ or leaving a nested group). A plugin simply re-sends `register` with its complet
 current `content` — the same mechanism used at initial registration (see
 [`register`](#register-plugin--core) above: "Sending `register` again … re-declares its
 content"). This was a deliberate protocol-simplicity trade-off: always resending the
-full `content` array costs more bytes than a lightweight single-slot update would for a
+full `content` map costs more bytes than a lightweight single-slot update would for a
 small change, in exchange for a single, uniform update mechanism instead of two.
 
 **Rendered immediately if relevant.** If the sending connection currently has focus,
@@ -634,23 +666,22 @@ time that connection gains focus — nothing is rendered right away.
 ## Example: a full focus/input/render/update cycle
 
 1. An application plugin connects, authenticates, and sends `register` declaring
-   `content.buttons: [{ "label": "Next Photo" }]`.
+   `content: { "B1": { "label": "Next Photo" } }`.
 2. Gatoway core sends it `slot_capacity` reflecting the Stream Deck plugin's current
    device capacity.
 3. It sends `focus: { focused: true }` when its window becomes active.
 4. Gatoway core sends the Stream Deck plugin a `render_update` for the physical position
-   corresponding to ordinal index 0 in the latest `device_capacity` report (e.g.
+   corresponding to label `"B1"` in the latest `device_capacity` report (e.g.
    `{ label: "Next Photo" }` at row 0, column 1), plus a fresh `slot_capacity` to the
    now-focused connection.
 5. The user presses that physical key. The Stream Deck plugin sends
    `input_event: { controller: "keypad", position: { row: 0, column: 1 }, eventType:
    "keyDown" }`.
-6. Gatoway core resolves that position to ordinal index 0 via the latest
-   `device_capacity` report, finds an entry at that index in the focused connection's
-   `content.buttons`, and sends that connection
-   `command: { controller: "keypad", slotIndex: 0, eventType: "keyDown" }`.
+6. Gatoway core resolves that position to label `"B1"` via the latest `device_capacity`
+   report, finds an entry for that label in the focused connection's `content` map, and
+   sends that connection `command: { label: "B1", eventType: "keyDown" }`.
 7. The application plugin acts on it (e.g. advances to the next photo), and re-sends
-   `register` with `content.buttons: [{ "label": "Next Photo (4/24)" }]` to reflect the
+   `register` with `content: { "B1": { "label": "Next Photo (4/24)" } }` to reflect the
    new position in its own photo sequence. Since this connection is still focused,
    Gatoway core immediately sends the Stream Deck plugin a fresh `render_update` for that
    same position with the updated label — no further key press or focus change needed.

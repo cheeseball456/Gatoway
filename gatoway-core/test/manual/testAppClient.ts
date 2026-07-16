@@ -1,26 +1,27 @@
 #!/usr/bin/env tsx
 /**
  * Manual test-double application-plugin client (extension-provided-slot-content
- * tasks.md 8.6).
+ * tasks.md 8.6, amended v1.7 tasks.md 10.8).
  *
  * No real second application plugin exists yet (Lightroom/xDesign are future changes),
  * so this script stands in for one: it connects to a running Gatoway core, registers as
  * pluginType "test-app" declaring a small fixture `content` (two buttons, one dial -
- * design.md D3: addressed only by ordinal position, never by an id), and lets a human
- * toggle its focus state or push a live content update from stdin so the focus-
- * tracking/profile-routing/live-content-update mechanism can be exercised end to end
- * against real Stream Deck+ hardware running the actual Stream Deck plugin (the real
- * display client).
+ * design.md D3, amended v1.7: addressed by fixed position label - `"B1"`, `"B2"`,
+ * `"D1"` - never by an id or ordinal array index), and lets a human toggle its focus
+ * state or push a live content update from stdin so the focus-tracking/profile-routing/
+ * live-content-update mechanism can be exercised end to end against real Stream Deck+
+ * hardware running the actual Stream Deck plugin (the real display client).
  *
  * Unlike the old `capabilities` + hand-authored `layout.json` model, **no separate
  * layout config file is needed anymore.** Gatoway core resolves this client's declared
  * content directly against whatever physical button/dial slots the Stream Deck plugin
- * reports (`device_capacity`) - ordinal position 0 of `content.buttons` renders at
- * physical button-slot 0, and so on. If the connected Stream Deck device currently has
- * fewer generic Key/Dial actions placed than this fixture declares, the extra entries
- * simply aren't rendered anywhere (safe underflow/overflow, matching FR-007) - place at
- * least two generic Key actions and one generic Dial action on the device to see the
- * full fixture.
+ * reports (`device_capacity`) - `"B1"` always renders at the device's first physical
+ * button slot, `"D1"` at its first physical dial slot, and so on, for as long as the
+ * connected device itself doesn't change (QA-020: a label is never derived from live
+ * placement). If the connected Stream Deck device's actual hardware capacity is smaller
+ * than this fixture declares, the extra entries simply aren't rendered anywhere (safe
+ * underflow/overflow, matching FR-007) - a Stream Deck+ (4 dials, 8 keys) or larger
+ * shows the full fixture.
  *
  * Usage (with Gatoway core already running, e.g. via the Stream Deck plugin or
  * `npm run dev --workspace=gatoway-core`):
@@ -41,9 +42,10 @@
  *
  * Any `command` message Gatoway core sends back (i.e. a rendered button/dial on the real
  * hardware was pressed/rotated while this test-double is focused) is printed as it
- * arrives, identified by its ordinal `slotIndex` rather than any id. Any `slot_capacity`
- * message (sent right after registration, and again on every focus gain) is also
- * printed, showing how many button/dial slots this client currently has to fill.
+ * arrives, identified by its fixed `label` (e.g. `"B1"`) rather than any id or ordinal
+ * index. Any `slot_capacity` message (sent right after registration, and again on every
+ * focus gain) is also printed, showing how many button/dial slots this client currently
+ * has to fill.
  */
 import { createInterface } from "node:readline/promises";
 import { readFile } from "node:fs/promises";
@@ -57,11 +59,9 @@ const PLUGIN_TYPE = "test-app";
 
 function buildFixtureContent(labelSuffix: string): RegisterContent {
   return {
-    buttons: [
-      { label: `Fixture A${labelSuffix}` },
-      { label: "Fixture B" },
-    ],
-    dials: [{ label: "Fixture Dial" }],
+    B1: { label: `Fixture A${labelSuffix}` },
+    B2: { label: "Fixture B" },
+    D1: { label: "Fixture Dial" },
   };
 }
 
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     if (line === "update") {
       // Alternates between two labels each time, so a repeated "update" visibly toggles
       // the real hardware's first button's label if this test-double is currently
-      // focused. Re-sends the connection's *entire* content array - the only mechanism
+      // focused. Re-sends the connection's *entire* content map - the only mechanism
       // for any content change now (design.md D3) - rather than a single-field update.
       updateToggle = !updateToggle;
       socket.write(

@@ -4,9 +4,8 @@ import {
   MessageParseError,
   type GatowayMessage,
 } from "../protocol/envelope.js";
-import { validateSlotContent } from "../protocol/slotContentValidation.js";
+import { validateSlotContentEntry } from "../protocol/slotContentValidation.js";
 import type {
-  Controller,
   DeviceCapacityPayload,
   ErrorPayload,
   FocusPayload,
@@ -14,7 +13,7 @@ import type {
   RegisterAckPayload,
   RegisterContent,
   RegisterPayload,
-  SlotContent,
+  SlotCapacityPayload,
 } from "../protocol/messages.js";
 import type { ConnectionManager } from "./connectionManager.js";
 import type { ProtocolRouter } from "./protocolRouter.js";
@@ -75,54 +74,48 @@ export function sendError(
   });
 }
 
-/** A single rejected `content` entry, reported by controller + its position in that array. */
+/** A single rejected `content` entry, reported by the label it was declared under (amended v1.7 for QA-020). */
 export interface RejectedContentEntry {
-  controller: Controller;
-  index: number;
+  label: string;
   reason: string;
 }
 
-function validateEntries(
-  raw: unknown,
-  controller: Controller,
-  rejected: RejectedContentEntry[],
-): SlotContent[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  const result: SlotContent[] = [];
-  raw.forEach((entry, index) => {
-    const validation = validateSlotContent(entry, controller);
-    if (validation.ok) {
-      result.push(validation.content);
-    } else {
-      rejected.push({ controller, index, reason: validation.reason });
-    }
-  });
-  return result;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
  * Resolves the `content` a `register` message declares (extension-provided-slot-content
- * design.md D3): an explicit `content` replaces the connection's previously-declared
- * content in full (omission means "unchanged", never cleared), with each entry in
- * `content.buttons`/`content.dials` validated against the `SlotContent` shape
- * independently. An entry that fails validation is dropped from its own array rather
- * than failing the whole registration; the caller reports dropped entries (controller +
- * index + reason) via a follow-up `error` message.
+ * design.md D3/D4, amended v1.7 for QA-020): an explicit `content` replaces the
+ * connection's previously-declared content in full (omission means "unchanged", never
+ * cleared), with each map entry validated independently against both its key (must be a
+ * currently-valid label for `capacity`) and its value (the `SlotContent` shape). An
+ * entry that fails either check is dropped from the map rather than failing the whole
+ * registration; the caller reports dropped entries (label + reason) via a follow-up
+ * `error` message.
  */
 function resolveContent(
   payload: Partial<RegisterPayload>,
   connection: ConnectionRecord,
+  capacity: SlotCapacityPayload,
 ): { content: RegisterContent; rejected: RejectedContentEntry[] } {
   if (!payload.content) {
-    return { content: connection.content ?? { buttons: [], dials: [] }, rejected: [] };
+    return { content: connection.content ?? {}, rejected: [] };
   }
 
   const rejected: RejectedContentEntry[] = [];
-  const buttons = validateEntries(payload.content.buttons, "keypad", rejected);
-  const dials = validateEntries(payload.content.dials, "encoder", rejected);
-  return { content: { buttons, dials }, rejected };
+  const content: RegisterContent = {};
+  if (isPlainObject(payload.content)) {
+    for (const [label, value] of Object.entries(payload.content)) {
+      const validation = validateSlotContentEntry(label, value, capacity);
+      if (validation.ok) {
+        content[label] = validation.content;
+      } else {
+        rejected.push({ label, reason: validation.reason });
+      }
+    }
+  }
+  return { content, rejected };
 }
 
 /**
@@ -172,11 +165,13 @@ function handleRegister(
   const pluginType = typeof payload.pluginType === "string" ? payload.pluginType : "unknown";
   // `content` omitted on a register message means "unchanged", not "cleared" (matching
   // the old `capabilities` field's QA-003 rule): only an explicit `content` (including
-  // empty arrays) replaces a previously-declared one. Each entry in an explicit
-  // `content.buttons`/`content.dials` is validated against the `SlotContent` shape
-  // (design.md D4); an invalid entry is dropped rather than failing the whole
-  // registration, reported afterward via a follow-up `error` message.
-  const { content, rejected } = resolveContent(payload, connection);
+  // an empty map) replaces a previously-declared one. Each entry in an explicit
+  // `content` map is validated against both its key (a currently-valid label for the
+  // most recently reported device capacity - design.md D4, amended v1.7 for QA-020) and
+  // its value (the `SlotContent` shape); an invalid entry is dropped rather than
+  // failing the whole registration, reported afterward via a follow-up `error` message.
+  const capacity: SlotCapacityPayload = router?.getSlotCapacity() ?? { buttonSlots: 0, dialSlots: 0 };
+  const { content, rejected } = resolveContent(payload, connection, capacity);
 
   // Already authenticated: this is the WebSocket path (auth already happened at
   // upgrade time via the Origin allowlist) declaring its content, or a plugin

@@ -3,6 +3,8 @@ import { ConnectionManager } from "../../src/connection/connectionManager.js";
 import { handleRawMessage, type AuthenticateFn } from "../../src/connection/messageHandler.js";
 import { encodeMessage } from "../../src/protocol/envelope.js";
 import type { Logger } from "../../src/logging/logger.js";
+import type { ProtocolRouter } from "../../src/connection/protocolRouter.js";
+import type { SlotCapacityPayload } from "../../src/protocol/messages.js";
 
 function fakeLogger(): Logger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
@@ -10,6 +12,24 @@ function fakeLogger(): Logger {
 
 const acceptAll: AuthenticateFn = () => ({ ok: true });
 const rejectAll: AuthenticateFn = () => ({ ok: false, reason: "invalid_token" });
+
+/**
+ * A minimal fake `ProtocolRouter` supplying only `getSlotCapacity` (used by
+ * `handleRegister` to validate declared content-map keys against the current device
+ * capacity - design.md D4, amended v1.7 for QA-020); the other methods are unused by
+ * these tests but must exist to satisfy the interface.
+ */
+function fakeRouter(capacity: SlotCapacityPayload): ProtocolRouter {
+  return {
+    handleRegistered: vi.fn(),
+    handleFocus: vi.fn(),
+    handleInputEvent: vi.fn(),
+    handleDeviceCapacity: vi.fn(),
+    getSlotCapacity: () => capacity,
+  };
+}
+
+const CAPACITY: SlotCapacityPayload = { buttonSlots: 3, dialSlots: 2 };
 
 describe("handleRawMessage", () => {
   it("authenticates on a valid register message and sends register_ack ok", () => {
@@ -24,7 +44,7 @@ describe("handleRawMessage", () => {
 
     const register = encodeMessage({
       type: "register",
-      payload: { pluginType: "lightroom", content: { buttons: [], dials: [] }, token: "good" },
+      payload: { pluginType: "lightroom", content: {}, token: "good" },
     });
     handleRawMessage(register, connection, manager, acceptAll, logger);
 
@@ -118,9 +138,9 @@ describe("handleRawMessage", () => {
 
     const register = encodeMessage({
       type: "register",
-      payload: { pluginType: "xdesign", content: { buttons: [{ label: "A" }], dials: [] } },
+      payload: { pluginType: "xdesign", content: { B1: { label: "A" } } },
     });
-    handleRawMessage(register, connection, manager, rejectAll, logger);
+    handleRawMessage(register, connection, manager, rejectAll, logger, fakeRouter(CAPACITY));
 
     expect(connection.state).toBe("authenticated");
     expect(connection.pluginType).toBe("xdesign");
@@ -138,12 +158,12 @@ describe("handleRawMessage", () => {
     const manager = new ConnectionManager(logger);
     const connection = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
 
-    const content = { buttons: [{ label: "A" }], dials: [] };
+    const content = { B1: { label: "A" } };
     const register = encodeMessage({
       type: "register",
       payload: { pluginType: "lightroom", content, token: "good" },
     });
-    handleRawMessage(register, connection, manager, acceptAll, logger);
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
 
     const info = logger.info as ReturnType<typeof vi.fn>;
     const succeeded = info.mock.calls.find(
@@ -165,12 +185,12 @@ describe("handleRawMessage", () => {
       close: vi.fn(),
     });
 
-    const content = { buttons: [], dials: [{ label: "B" }] };
+    const content = { D1: { label: "B" } };
     const register = encodeMessage({
       type: "register",
       payload: { pluginType: "xdesign", content },
     });
-    handleRawMessage(register, connection, manager, acceptAll, logger);
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
 
     const info = logger.info as ReturnType<typeof vi.fn>;
     const registered = info.mock.calls.find(
@@ -187,13 +207,14 @@ describe("handleRawMessage", () => {
     const logger = fakeLogger();
     const manager = new ConnectionManager(logger);
     const connection = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
+    const router = fakeRouter(CAPACITY);
 
-    const content = { buttons: [{ label: "A" }], dials: [] };
+    const content = { B1: { label: "A" } };
     const initial = encodeMessage({
       type: "register",
       payload: { pluginType: "lightroom", content, token: "good" },
     });
-    handleRawMessage(initial, connection, manager, acceptAll, logger);
+    handleRawMessage(initial, connection, manager, acceptAll, logger, router);
     expect(connection.content).toEqual(content);
 
     // Re-register without a `content` field at all.
@@ -201,35 +222,36 @@ describe("handleRawMessage", () => {
       type: "register",
       payload: { pluginType: "lightroom" },
     });
-    handleRawMessage(reRegister, connection, manager, acceptAll, logger);
+    handleRawMessage(reRegister, connection, manager, acceptAll, logger, router);
 
     expect(connection.content).toEqual(content);
   });
 
   // An explicit (even empty) `content` on re-registration should still replace the
   // prior declaration — only *omission* means "unchanged".
-  it("replaces content when a re-registration explicitly provides new arrays", () => {
+  it("replaces content when a re-registration explicitly provides a new map", () => {
     const logger = fakeLogger();
     const manager = new ConnectionManager(logger);
     const connection = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
+    const router = fakeRouter(CAPACITY);
 
     const initial = encodeMessage({
       type: "register",
       payload: {
         pluginType: "lightroom",
-        content: { buttons: [{ label: "A" }], dials: [] },
+        content: { B1: { label: "A" } },
         token: "good",
       },
     });
-    handleRawMessage(initial, connection, manager, acceptAll, logger);
+    handleRawMessage(initial, connection, manager, acceptAll, logger, router);
 
     const reRegister = encodeMessage({
       type: "register",
-      payload: { pluginType: "lightroom", content: { buttons: [], dials: [] } },
+      payload: { pluginType: "lightroom", content: {} },
     });
-    handleRawMessage(reRegister, connection, manager, acceptAll, logger);
+    handleRawMessage(reRegister, connection, manager, acceptAll, logger, router);
 
-    expect(connection.content).toEqual({ buttons: [], dials: [] });
+    expect(connection.content).toEqual({});
   });
 
   it("registers successfully with only the valid content entries when one entry is malformed, and sends a follow-up error", () => {
@@ -247,16 +269,16 @@ describe("handleRawMessage", () => {
       payload: {
         pluginType: "lightroom",
         content: {
-          buttons: [{ label: "One" }, { label: "" }],
-          dials: [],
+          B1: { label: "One" },
+          B2: { label: "" },
         },
         token: "good",
       },
     });
-    handleRawMessage(register, connection, manager, acceptAll, logger);
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
 
     expect(connection.state).toBe("authenticated");
-    expect(connection.content).toEqual({ buttons: [{ label: "One" }], dials: [] });
+    expect(connection.content).toEqual({ B1: { label: "One" } });
     expect(sent).toEqual([
       { type: "register_ack", connectionId: connection.id, payload: { status: "ok", connectionId: connection.id } },
       {
@@ -265,7 +287,7 @@ describe("handleRawMessage", () => {
         payload: {
           message:
             "one or more declared content entries were invalid and have been dropped from the connection's content",
-          details: { rejectedContent: [{ controller: "keypad", index: 1, reason: '"label" must be a non-empty string' }] },
+          details: { rejectedContent: [{ label: "B2", reason: '"label" must be a non-empty string' }] },
         },
       },
     ]);
@@ -286,24 +308,52 @@ describe("handleRawMessage", () => {
       payload: {
         pluginType: "lightroom",
         content: {
-          buttons: [{ label: "" }],
-          dials: [{ label: "Zoom", state: 1 }],
+          B1: { label: "" },
+          D1: { label: "Zoom", state: 1 },
         },
         token: "good",
       },
     });
-    handleRawMessage(register, connection, manager, acceptAll, logger);
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
 
     expect(connection.state).toBe("authenticated");
-    expect(connection.content).toEqual({ buttons: [], dials: [] });
+    expect(connection.content).toEqual({});
     const errorMessage = sent.find((m) => (m as { type: string }).type === "error") as
-      | { payload: { details: { rejectedContent: { controller: string; index: number; reason: string }[] } } }
+      | { payload: { details: { rejectedContent: { label: string; reason: string }[] } } }
       | undefined;
     expect(errorMessage).toBeDefined();
     expect(errorMessage?.payload.details.rejectedContent).toEqual([
-      { controller: "keypad", index: 0, reason: '"label" must be a non-empty string' },
-      { controller: "encoder", index: 0, reason: '"state" is not valid on a dial (content.dials) entry' },
+      { label: "B1", reason: '"label" must be a non-empty string' },
+      { label: "D1", reason: '"state" is not valid on a dial (D-prefixed) entry' },
     ]);
+  });
+
+  it("rejects a content entry whose key is not a currently-valid label for the reported device capacity", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        // B4 is out of range for a 3-button-slot capacity; Unknown isn't a label at all.
+        content: { B1: { label: "One" }, B4: { label: "Overflow" }, Unknown: { label: "Bad" } },
+        token: "good",
+      },
+    });
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
+
+    expect(connection.content).toEqual({ B1: { label: "One" } });
+    const errorMessage = sent.find((m) => (m as { type: string }).type === "error") as
+      | { payload: { details: { rejectedContent: { label: string; reason: string }[] } } }
+      | undefined;
+    expect(errorMessage?.payload.details.rejectedContent.map((r) => r.label)).toEqual(["B4", "Unknown"]);
   });
 
   it("sends no follow-up error when every declared content entry is valid", () => {
@@ -320,11 +370,11 @@ describe("handleRawMessage", () => {
       type: "register",
       payload: {
         pluginType: "lightroom",
-        content: { buttons: [{ label: "One" }], dials: [] },
+        content: { B1: { label: "One" } },
         token: "good",
       },
     });
-    handleRawMessage(register, connection, manager, acceptAll, logger);
+    handleRawMessage(register, connection, manager, acceptAll, logger, fakeRouter(CAPACITY));
 
     expect(sent.map((m) => (m as { type: string }).type)).toEqual(["register_ack"]);
   });
@@ -335,13 +385,14 @@ describe("handleRawMessage", () => {
       const manager = new ConnectionManager(logger);
       const connection = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
       manager.transition(connection.id, "authenticated");
-      manager.setPluginInfo(connection.id, "stream-deck", { buttons: [], dials: [] });
+      manager.setPluginInfo(connection.id, "stream-deck", {});
 
       const router = {
         handleRegistered: vi.fn(),
         handleFocus: vi.fn(),
         handleInputEvent: vi.fn(),
         handleDeviceCapacity: vi.fn(),
+        getSlotCapacity: () => ({ buttonSlots: 0, dialSlots: 0 }),
       };
 
       const message = encodeMessage({
