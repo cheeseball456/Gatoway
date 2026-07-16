@@ -1445,3 +1445,35 @@ Coverage for this change is thorough and, with the one exception noted in QA-019
 **Recommendation:** ⚠️ **Conditional pass** — No Critical or Major issues were found; every specifically-flagged risk area (D6's five-step algorithm, complete removal of `persisted-layout-config`, `device_capacity`'s sender restriction and lack of auth bypass, dial-state validation and the `rejectedContent` error shape, deterministic device-capacity ordering, re-registration re-render behavior, the icon pixel-dimension claim, and both workspaces' test/typecheck results) was independently verified against the actual code and a direct re-run of the test suites, not taken on trust. The single open finding (QA-019, Minor) is a testing-coverage completeness gap — the code is very likely correct by inspection, but the specific "overflow never causes an out-of-range render" claim in `tasks.md` 8.5 is not actually backed by a test, and no test in the suite ever uses a device capacity of more than one position per controller. The architect may choose to have the developer add the two suggested tests before archiving, or accept the risk and defer it — this does not block `/verify`, since it does not represent a known-broken behavior, only an unverified one.
 
 ---
+
+# Interactive Verification Session (`/verify`) — 2026-07-16 — `extension-provided-slot-content`
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Live hardware verification of `extension-provided-slot-content` (branch `extension-provided-slot-content`, HEAD `a60caed` at time of this session). QA-019 had already been fixed and re-verified via automated tests before this session began.
+
+## Blocking finding: plugin crash-loops unconditionally on every startup
+
+**What:** The freshly-built Stream Deck plugin was relaunched via the real Stream Deck application (after killing a stale standalone `gatoway-core` instance left over from an earlier session and doing a clean `npm run build` on this branch). With a real profile active (3 generic Key actions + 1 generic Dial action placed, showing "Gatoway"/"Dial" — stale content from a prior run, since nothing new had rendered), no `com.gatoway.streamdeck` or `gatoway-core` process ever appeared in `ps aux`, despite repeated checks over ~15 seconds.
+
+**Scenario:** The plugin bundle's own SDK-generated logs (`stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/logs/`) showed 10 crash log files within the span of one minute (`com.gatoway.streamdeck.0.log` through `.9.log`, timestamps 10:00–10:01), each ending in the same uncaught exception — the plugin process crashes immediately on every single startup attempt, and Elgato's own Stream Deck application keeps restarting it in a tight loop, which is why no live process was ever caught by `ps aux`.
+
+**Evidence:**
+```
+Error: [ERR_NOT_SUPPORTED]: onDeviceDidChange requires Stream Deck version 7.0 or higher; please update the "Software.MinimumVersion" in the plugin's manifest to "7.0" or higher.
+    at requiresVersion (.../node_modules/@elgato/streamdeck/dist/plugin/validation.js:34:15)
+    at DeviceService.onDeviceDidChange (.../node_modules/@elgato/streamdeck/dist/plugin/devices/service.js:40:9)
+    at <anonymous> (stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/src/plugin.ts:74:20)
+```
+`stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json`'s `Software.MinimumVersion` is still `"6.5"` — task group 7's new `onDeviceDidChange` listener (added to detect live device connect/disconnect for `device_capacity` re-reporting, per design.md D1/task 7.3) requires SDK 7.0+, and the SDK's own runtime validation throws synchronously the moment this handler is registered, rather than merely warning. The manifest was never updated to match. The real, currently-installed Stream Deck application on this machine reports version `7.0.3` (confirmed via this session's own registration-info payload), so bumping the declared minimum is not just a workaround — it accurately reflects a real, already-satisfied requirement.
+
+**Impact:** Total, unconditional blocker — the Stream Deck plugin cannot start at all in its current state, on any device, regardless of any placed action or device_capacity scenario. This blocks 100% of live verification for this change, not just the device-capacity-specific behaviors.
+
+**Root-cause level:** Code (a manifest field that should have been updated alongside the SDK API it now depends on — not a design or requirements gap; design.md never specified a minimum SDK version, and this is purely a consequence of which SDK method the implementation chose to use).
+
+**Suggested fix direction:** Update `manifest.json`'s `Software.MinimumVersion` to `"7.0"`.
+
+## Status
+
+**Recommendation:** ❌ **Requires fixes** — this is a Critical, code-level, unconditional blocker. Route to `developer` for the one-line manifest fix, then resume this `/verify` session to complete the live checks that couldn't even begin (device capacity detection/reporting, live focus/render/input round trip, re-registration re-render, overflow/underflow on real hardware).
+
+---
