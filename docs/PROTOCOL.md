@@ -20,6 +20,16 @@ fixed label always means the same physical position for as long as the connected
 itself doesn't change. See [Slot capacity and label-addressed content](#slot-capacity-and-label-addressed-content)
 below.
 
+**Further amended (v1.8, QA-021/QA-022):** because Gatoway core can be spawned by the
+Stream Deck plugin before that same plugin has connected back and reported its device's
+capacity, `slot_capacity`'s counts can be **unknown** (`null`), not just a known number —
+distinct from a known `0` (a device genuinely lacking that control type). Registering
+while capacity is unknown no longer permanently rejects a plugin's content as
+out-of-range; range-checking is simply deferred. Separately, the label-key parser now
+rejects non-canonical numeric forms (e.g. `"B01"`, a leading zero) unconditionally, since
+they could never actually be resolved. See
+[`slot_capacity`](#slot_capacity-core--application-plugin) below for the full detail.
+
 Speaking the wire protocol correctly is now also *sufficient* to see something render —
 unlike the old model, there is no separate, host-side layout/config file to hand-author
 in addition to this wire contract. Gatoway core tells each application plugin how many
@@ -143,15 +153,27 @@ displayed content.
   or derived from, the connection's unique ID — multiple simultaneous connections may
   share the same `pluginType`.
 - **Each `content` map entry is validated by both its key and its value.** The *key*
-  (the label itself, e.g. `"B1"`) must match the `B<n>`/`D<n>` convention *and* be
-  in-range for the most recently reported device capacity — an unrecognized or
-  out-of-range label is itself a rejection reason. The *value* is validated against the
-  `SlotContent` shape below (e.g. a missing `label`, or a `state` field on a
-  `D`-prefixed entry). An entry that fails either check is *dropped* from the map — it
-  does **not** fail the whole registration. The connection still authenticates and
-  registers successfully with whatever valid entries remain (even if that's none of
-  them), and Gatoway core sends a follow-up [`error`](#error-either-direction) message
-  afterward (after `register_ack`) identifying which entries were rejected and why. See
+  (the label itself, e.g. `"B1"`) must first be in **canonical form**: exactly `B` or
+  `D`, followed by a positive integer with no leading zeros and no other characters
+  (`"B1"`, `"B12"` are valid; `"B01"`, `"b1"`, `"B1x"` are not). **This is checked
+  unconditionally, regardless of whether device capacity is currently known**
+  (v1.8, QA-022) — a non-canonical key could never actually be resolved even if it
+  happened to land in range once capacity became known, so there is no reason to defer
+  rejecting it. Once a key is confirmed canonical, its range is checked against the
+  most recently reported device capacity — **but only if that capacity is actually
+  known** (see [`slot_capacity`](#slot_capacity-core--application-plugin) below): while
+  a dimension's capacity is still unknown, range-checking for that dimension is skipped
+  entirely, and the canonically-formed key is accepted provisionally (it may or may not
+  turn out to be in range once capacity becomes known — see the note on retroactive
+  validation below). Once capacity is known, an out-of-range label (e.g. `"B5"` on a
+  device with only 3 button slots) is itself a rejection reason. The *value* is
+  validated against the `SlotContent` shape below (e.g. a missing `label`, or a `state`
+  field on a `D`-prefixed entry) regardless of the key's range-check outcome. An entry
+  that fails any of these checks is *dropped* from the map — it does **not** fail the
+  whole registration. The connection still authenticates and registers successfully
+  with whatever valid entries remain (even if that's none of them), and Gatoway core
+  sends a follow-up [`error`](#error-either-direction) message afterward (after
+  `register_ack`) identifying which entries were rejected and why. See
   [Content validation errors](#content-validation-errors) below for the exact shape.
 
 #### `RegisterContent` / `SlotContent`
@@ -259,10 +281,22 @@ being validated against):
 there is no separate `id` to report by, since none exists at this shape. A `label` is
 reported as rejected either because its *value* failed the `SlotContent` shape check
 (as above), or because the *key itself* wasn't a currently-valid label at all — not
-matching the `B<n>`/`D<n>` convention, or out of range for the most recently reported
-device capacity (e.g. `"B5"` on a device with only 3 button slots). Registration still
-succeeds with every *other*, valid entry in the map — even if every entry was rejected,
-the connection registers with empty content rather than failing outright.
+matching the canonical `B<n>`/`D<n>` form (checked regardless of whether capacity is
+known — v1.8, QA-022), or out of range for the most recently reported device capacity
+(e.g. `"B5"` on a device with only 3 button slots — only checked once that capacity is
+actually known; see [`slot_capacity`](#slot_capacity-core--application-plugin) below).
+Registration still succeeds with every *other*, valid entry in the map — even if every
+entry was rejected, the connection registers with empty content rather than failing
+outright.
+
+**No retroactive rejection.** A canonically-formed label accepted provisionally while
+capacity was unknown is never revisited once capacity becomes known — if it turns out
+to be out of range, it simply never renders (exactly like any other out-of-range or
+undeclared label), rather than being dropped from the connection's content or reported
+via a second `error` after the fact. A plugin that wants accurate rejection feedback for
+a label it declared while capacity was unknown should re-send `register` after receiving
+the (broadcast) `slot_capacity` that tells it real capacity is now known — at that
+point, normal range validation applies to the fresh registration.
 
 ## Focus tracking
 
@@ -395,28 +429,46 @@ interface DeviceCapacityPayload {
 
 Tells an application plugin how many button/dial slots the connected device physically
 has — bare counts only; an application plugin derives its own valid label set
-(`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using the labeling
-convention above. The actual label strings are never enumerated over the wire, since
-both sides derive them identically from the same counts.
+(`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts, once known, using
+the labeling convention above. The actual label strings are never enumerated over the
+wire, since both sides derive them identically from the same counts.
 
 ```jsonc
 { "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": 2, "dialSlots": 1 } }
+{ "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": null, "dialSlots": null } }
 ```
 
 ```ts
 interface SlotCapacityPayload {
-  buttonSlots: number;
-  dialSlots: number;
+  buttonSlots: number | null;  // null = not yet known (Stream Deck plugin hasn't reported)
+  dialSlots: number | null;
 }
 ```
 
 - Sent once immediately after that connection's own successful `register_ack`, and again
   every time Gatoway core records that connection as newly focused (never on blur).
 - Derived directly from the Stream Deck plugin's latest `device_capacity` report
-  (`buttonSlots = buttonPositions.length`, `dialSlots = dialPositions.length`). If no
-  `device_capacity` has ever been received yet (e.g. the Stream Deck plugin isn't
-  connected), both counts are `0` — an application plugin declaring content against a
-  capacity of zero simply has nothing rendered yet, which is safe, normal behavior.
+  (`buttonSlots = buttonPositions.length`, `dialSlots = dialPositions.length`).
+- **`null` means "not yet known" — distinct from a known `0` (v1.8, QA-021).** If no
+  `device_capacity` has ever been received yet, both counts are `null`, not `0`: `0` is
+  a real, valid state (a device genuinely known to have none of that control type), so
+  it must never be reused to also mean "unknown." This distinction matters because
+  Gatoway core can be spawned by the Stream Deck plugin, which must then itself connect
+  back to Gatoway core — an application plugin can register before that connection has
+  ever reported capacity. Treating unknown the same as a known `0` would permanently
+  reject that plugin's content as "out of range" with no path to recovery; treating it
+  as genuinely unknown instead means content is accepted provisionally (see
+  [Content validation errors](#content-validation-errors) above) and simply doesn't
+  render until capacity becomes known, exactly like any other not-yet-fillable slot.
+- **Broadcast on capacity becoming known or changing (v1.8, QA-021).** In addition to
+  the per-connection register/focus-gain delivery above, Gatoway core sends a fresh,
+  unsolicited `slot_capacity` to **every currently-connected application plugin** (not
+  just whichever connection's own register/focus-gain happened to trigger the
+  underlying `device_capacity` report) the first time real capacity becomes known after
+  having been unknown, and again on any subsequent `device_capacity` change. A plugin
+  should treat any arrival of `slot_capacity` the same way regardless of what triggered
+  it (own registration, own focus-gain, or this broadcast) — there is no way to
+  distinguish the trigger from the message itself, nor any need to.
 
 ### How resolution actually works
 

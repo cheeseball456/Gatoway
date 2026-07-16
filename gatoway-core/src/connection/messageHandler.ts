@@ -167,10 +167,13 @@ function handleRegister(
   // the old `capabilities` field's QA-003 rule): only an explicit `content` (including
   // an empty map) replaces a previously-declared one. Each entry in an explicit
   // `content` map is validated against both its key (a currently-valid label for the
-  // most recently reported device capacity - design.md D4, amended v1.7 for QA-020) and
-  // its value (the `SlotContent` shape); an invalid entry is dropped rather than
-  // failing the whole registration, reported afterward via a follow-up `error` message.
-  const capacity: SlotCapacityPayload = router?.getSlotCapacity() ?? { buttonSlots: 0, dialSlots: 0 };
+  // most recently reported device capacity - design.md D4, amended v1.7 for QA-020,
+  // further amended v1.8 for QA-021: `null` counts mean "not yet known," and range
+  // checking is skipped rather than treating that as a known-zero capacity) and its
+  // value (the `SlotContent` shape); an invalid entry is dropped rather than failing
+  // the whole registration, reported afterward via a follow-up `error` message.
+  const capacity: SlotCapacityPayload =
+    router?.getSlotCapacity() ?? { buttonSlots: null, dialSlots: null };
   const { content, rejected } = resolveContent(payload, connection, capacity);
 
   // Already authenticated: this is the WebSocket path (auth already happened at

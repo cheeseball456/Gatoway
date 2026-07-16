@@ -2,14 +2,22 @@ import type { Controller, SlotCapacityPayload, SlotContent } from "./messages.js
 
 /**
  * Validates `RegisterContent` map entries at `register` time (extension-provided-slot-
- * content design.md D3/D4, amended v1.7 for QA-020): each entry is keyed by a fixed
- * position label (`"B1"`, `"D1"`, ...), not an ordinal array index. Mirrors the
- * project's established validator style (never throws; returns a descriptive failure
- * reason instead of a boolean) - see the now-removed `capabilityValidation.ts` this
- * originally replaced.
+ * content design.md D3/D4, amended v1.7 for QA-020, further amended v1.8 for
+ * QA-021/QA-022): each entry is keyed by a fixed position label (`"B1"`, `"D1"`, ...),
+ * not an ordinal array index. Mirrors the project's established validator style (never
+ * throws; returns a descriptive failure reason instead of a boolean) - see the
+ * now-removed `capabilityValidation.ts` this originally replaced.
  */
 
-const LABEL_PATTERN = /^([BD])(\d+)$/;
+/**
+ * Canonical form only (QA-022 fix): exactly `B` or `D`, followed by a positive integer
+ * with no leading zeros and no other characters. `[1-9]\d*` deliberately excludes
+ * `"0"` itself (ordinals are 1-based) and any leading-zero form like `"B01"` - both of
+ * which the original v1.7 pattern (`\d+`) wrongly accepted, even though the resolver
+ * (`profileRouter.ts`'s `labelFor`) never derives anything but the canonical form, so a
+ * non-canonical key could pass validation yet never actually be resolved.
+ */
+const LABEL_PATTERN = /^([BD])([1-9]\d*)$/;
 
 export interface ParsedLabel {
   controller: Controller;
@@ -46,14 +54,23 @@ export type SlotContentValidationResult =
 
 /**
  * Validates a single `register`-time `content` map entry against both its key and its
- * value (design.md D4, amended v1.7):
+ * value (design.md D4, amended v1.7, further amended v1.8 for QA-021/QA-022):
  *
- * - **Key** (`label`): must match the labeling convention (`parseLabel`) *and* be
- *   in-range for the most recently reported device capacity (`B<n>` only valid for
- *   `1 <= n <= capacity.buttonSlots`, `D<n>` only valid for `1 <= n <= capacity.dialSlots`).
- *   An unrecognized or out-of-range label is itself a rejection reason, not just its
- *   value - this is new in v1.7 (QA-020): under v1.6's ordinal-index model there was no
- *   key to validate, since content was addressed by array position alone.
+ * - **Key** (`label`): must match the canonical labeling convention (`parseLabel`) -
+ *   regardless of whether capacity is currently known (QA-022: a non-canonical form
+ *   like `"B01"` is rejected unconditionally, since it could never be resolved
+ *   anyway). Once the key is confirmed canonical, its range is checked against the
+ *   most recently reported device capacity (`B<n>` only valid for
+ *   `1 <= n <= capacity.buttonSlots`, `D<n>` only valid for
+ *   `1 <= n <= capacity.dialSlots`) - **but only while that capacity dimension is
+ *   actually known** (QA-021): while `buttonSlots`/`dialSlots` is still `null`
+ *   (unknown), range checking is skipped entirely for that dimension, and a
+ *   canonically-formed key is accepted provisionally (design.md D9: it may or may not
+ *   turn out to be in range once capacity becomes known - it is never retroactively
+ *   re-validated). An unrecognized or (when known) out-of-range label is itself a
+ *   rejection reason, not just its value - this was new in v1.7 (QA-020): under v1.6's
+ *   ordinal-index model there was no key to validate, since content was addressed by
+ *   array position alone.
  * - **Value**: `label` (the value's own field - distinct from the map key of the same
  *   name, see `SlotContent`'s own doc comment) a non-empty string (required); `icon` a
  *   string if present (no `null` at registration); `state` a number if present, and
@@ -69,12 +86,16 @@ export function validateSlotContentEntry(
   if (!parsed) {
     return {
       ok: false,
-      reason: `"${label}" is not a valid position label (expected "B<n>" or "D<n>")`,
+      reason: `"${label}" is not a valid position label (expected "B<n>" or "D<n>", no leading zeros)`,
     };
   }
 
   const slots = parsed.controller === "keypad" ? capacity.buttonSlots : capacity.dialSlots;
-  if (parsed.ordinal > slots) {
+  // `slots === null` means this dimension's capacity is not yet known (QA-021): skip
+  // range checking entirely rather than treating "unknown" as if it were a known `0`,
+  // which would permanently reject every label until the Stream Deck plugin reports
+  // capacity - a canonically-formed key is accepted provisionally instead (design.md D9).
+  if (slots !== null && parsed.ordinal > slots) {
     const kind = parsed.controller === "keypad" ? "button" : "dial";
     return {
       ok: false,

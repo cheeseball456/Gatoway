@@ -356,6 +356,77 @@ describe("handleRawMessage", () => {
     expect(errorMessage?.payload.details.rejectedContent.map((r) => r.label)).toEqual(["B4", "Unknown"]);
   });
 
+  // QA-021: capacity being unknown must not be conflated with a known `0` - a
+  // canonically-formed label is accepted provisionally rather than rejected outright.
+  it("accepts a canonically-formed content entry provisionally while device capacity is unknown", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        content: { B5: { label: "Maybe Out Of Range" } },
+        token: "good",
+      },
+    });
+    handleRawMessage(
+      register,
+      connection,
+      manager,
+      acceptAll,
+      logger,
+      fakeRouter({ buttonSlots: null, dialSlots: null }),
+    );
+
+    expect(connection.content).toEqual({ B5: { label: "Maybe Out Of Range" } });
+    expect(sent.map((m) => (m as { type: string }).type)).toEqual(["register_ack"]);
+  });
+
+  // QA-022: a non-canonical key (e.g. a leading zero) must be rejected regardless of
+  // whether device capacity is currently known, since it could never be resolved.
+  it("rejects a non-canonical label form regardless of whether device capacity is known", () => {
+    const logger = fakeLogger();
+    const manager = new ConnectionManager(logger);
+    const sent: unknown[] = [];
+    const connection = manager.accept({
+      transport: "tcp",
+      send: (m) => sent.push(m),
+      close: vi.fn(),
+    });
+
+    const register = encodeMessage({
+      type: "register",
+      payload: {
+        pluginType: "lightroom",
+        content: { B01: { label: "Bad Form" } },
+        token: "good",
+      },
+    });
+    handleRawMessage(
+      register,
+      connection,
+      manager,
+      acceptAll,
+      logger,
+      fakeRouter({ buttonSlots: null, dialSlots: null }),
+    );
+
+    expect(connection.content).toEqual({});
+    const errorMessage = sent.find((m) => (m as { type: string }).type === "error") as
+      | { payload: { details: { rejectedContent: { label: string; reason: string }[] } } }
+      | undefined;
+    expect(errorMessage?.payload.details.rejectedContent).toEqual([
+      { label: "B01", reason: '"B01" is not a valid position label (expected "B<n>" or "D<n>", no leading zeros)' },
+    ]);
+  });
+
   it("sends no follow-up error when every declared content entry is valid", () => {
     const logger = fakeLogger();
     const manager = new ConnectionManager(logger);

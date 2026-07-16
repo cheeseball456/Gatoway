@@ -29,9 +29,6 @@ export const STREAM_DECK_PLUGIN_TYPE = "stream-deck";
 /** The built-in idle appearance's label (design.md D4: matches the old static Idle key's title). */
 const IDLE_LABEL = "Gatoway";
 
-/** No `device_capacity` has ever been received yet - both counts default to zero (design.md D2). */
-const EMPTY_CAPACITY: DeviceCapacityPayload = { buttonPositions: [], dialPositions: [] };
-
 export interface ProfileRouterOptions {
   manager: ConnectionManager;
   focusTracker: FocusTracker;
@@ -40,12 +37,15 @@ export interface ProfileRouterOptions {
 
 /**
  * Implements the `profile-routing`/`stream-deck-core-lifecycle` capabilities
- * (extension-provided-slot-content design.md D1-D6, amended v1.7 for QA-020): tracks
- * the Stream Deck plugin's latest fixed device-capacity report, resolves incoming
- * `input_event`s against the currently-focused connection's own declared,
- * label-addressed content, keeps the Stream Deck plugin's display in sync with focus
- * changes and live content updates (re-sent `register`), and delivers `slot_capacity`
- * to each application plugin at connection time and on every focus gain.
+ * (extension-provided-slot-content design.md D1-D6/D9, amended v1.7 for QA-020, further
+ * amended v1.8 for QA-021/QA-022): tracks the Stream Deck plugin's latest fixed
+ * device-capacity report (distinguishing "not yet known" from a known zero, D2),
+ * resolves incoming `input_event`s against the currently-focused connection's own
+ * declared, label-addressed content, keeps the Stream Deck plugin's display in sync
+ * with focus changes and live content updates (re-sent `register`), and delivers
+ * `slot_capacity` to each application plugin at connection time, on every focus gain,
+ * and, unsolicited, to every currently-connected application plugin whenever capacity
+ * first becomes known or subsequently changes.
  *
  * Gatoway core has no semantic understanding of what any entry means (AD-8 revised) -
  * only which physical position a fixed label (`"B1"`, `"D1"`, ...) maps to (via the
@@ -60,8 +60,15 @@ export class ProfileRouter implements ProtocolRouter {
   private readonly focusTracker: FocusTracker;
   private readonly logger: Logger;
 
-  /** The Stream Deck plugin's most recent `device_capacity` report (design.md D1). */
-  private latestCapacity: DeviceCapacityPayload = EMPTY_CAPACITY;
+  /**
+   * The Stream Deck plugin's most recent `device_capacity` report (design.md D1).
+   * `null` means no report has ever been received yet - distinct from a report whose
+   * position lists are themselves empty (a known "zero of this control type," e.g. the
+   * device disconnected - design.md D2, amended v1.8 for QA-021). Never confuse the two:
+   * `getSlotCapacity()` must report `null` counts (unknown), not `0` counts (known
+   * zero), while this is still `null`.
+   */
+  private latestCapacity: DeviceCapacityPayload | null = null;
 
   constructor(options: ProfileRouterOptions) {
     this.manager = options.manager;
@@ -113,9 +120,14 @@ export class ProfileRouter implements ProtocolRouter {
   }
 
   /**
-   * Handles a `device_capacity` report (design.md D1, tasks.md 3.4): accepted only from
-   * the Stream Deck plugin's own connection; the latest report fully replaces the
-   * previous one (never merged, never persisted).
+   * Handles a `device_capacity` report (design.md D1, tasks.md 3.4, amended v1.8 for
+   * QA-021): accepted only from the Stream Deck plugin's own connection; the latest
+   * report fully replaces the previous one (never merged, never persisted). Every
+   * accepted report - whether this is the first one ever received (capacity
+   * transitioning from unknown to known) or a later one (the device itself changed,
+   * per the Stream Deck plugin's own `device_capacity` sending rule) - broadcasts a
+   * fresh `slot_capacity` to every currently-connected application plugin, not just
+   * whichever connection happens to register or gain focus next.
    */
   handleDeviceCapacity(connection: ConnectionRecord, payload: DeviceCapacityPayload): void {
     if (connection.pluginType !== STREAM_DECK_PLUGIN_TYPE) {
@@ -143,6 +155,28 @@ export class ProfileRouter implements ProtocolRouter {
       },
       "stream deck plugin reported device capacity",
     );
+    this.broadcastSlotCapacity();
+  }
+
+  /**
+   * Sends a fresh `slot_capacity` to every currently-connected application plugin
+   * (design.md D2, amended v1.8 for QA-021) - every authenticated connection with a
+   * `pluginType` other than the Stream Deck plugin's own. Called whenever
+   * `device_capacity` is accepted, covering both "capacity just became known for the
+   * first time" and "the device itself changed" (the Stream Deck plugin only ever
+   * re-sends `device_capacity` on a genuine device change, so every accepted report
+   * here already represents one of those two cases).
+   */
+  private broadcastSlotCapacity(): void {
+    for (const connection of this.manager.list()) {
+      if (
+        connection.state === "authenticated" &&
+        connection.pluginType !== undefined &&
+        connection.pluginType !== STREAM_DECK_PLUGIN_TYPE
+      ) {
+        this.sendSlotCapacity(connection);
+      }
+    }
   }
 
   /**
@@ -231,6 +265,9 @@ export class ProfileRouter implements ProtocolRouter {
   }
 
   private positionsFor(controller: Controller): Position[] {
+    if (!this.latestCapacity) {
+      return [];
+    }
     return controller === "keypad"
       ? this.latestCapacity.buttonPositions
       : this.latestCapacity.dialPositions;
@@ -246,8 +283,15 @@ export class ProfileRouter implements ProtocolRouter {
     return (controller === "keypad" ? "B" : "D") + (index + 1);
   }
 
-  /** Returns the current button/dial slot counts, per `ProtocolRouter.getSlotCapacity`. */
+  /**
+   * Returns the current button/dial slot counts, per `ProtocolRouter.getSlotCapacity`
+   * (amended v1.8 for QA-021): `null` for both if no `device_capacity` report has ever
+   * been received - never `0`, which would mean a genuinely known-empty device.
+   */
   getSlotCapacity(): SlotCapacityPayload {
+    if (!this.latestCapacity) {
+      return { buttonSlots: null, dialSlots: null };
+    }
     return {
       buttonSlots: this.latestCapacity.buttonPositions.length,
       dialSlots: this.latestCapacity.dialPositions.length,

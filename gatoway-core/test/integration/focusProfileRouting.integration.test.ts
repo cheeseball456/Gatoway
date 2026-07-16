@@ -174,22 +174,57 @@ describe("focus tracking + profile routing (integration)", () => {
     return streamDeck;
   }
 
-  it("sends zero counts and no idle sweep before any device_capacity has ever been received", async () => {
+  it("sends null (unknown) counts and no idle sweep before any device_capacity has ever been received", async () => {
     const { port, token } = await start();
 
     const streamDeck = await TestDoubleClient.connectAndRegister(port, token, STREAM_DECK_PLUGIN_TYPE);
     clients.push(streamDeck);
 
-    // No device_capacity reported yet - zero physical positions exist to sweep, and an
-    // application plugin sees zero slot counts (design.md D2's "safe, nothing rendered
-    // yet" fallback).
+    // No device_capacity reported yet - capacity is not yet known, so an application
+    // plugin sees `null` counts (design.md D2, amended v1.8 for QA-021), not a known
+    // `0`, and no physical positions exist yet to sweep.
     const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", FIXTURE_CONTENT);
     clients.push(app);
     const [slotCapacity] = await app.waitForMessageType("slot_capacity");
-    expect(slotCapacity.payload).toEqual({ buttonSlots: 0, dialSlots: 0 });
+    expect(slotCapacity.payload).toEqual({ buttonSlots: null, dialSlots: null });
 
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(0);
+  });
+
+  it("accepts a canonically-formed but potentially out-of-range label while capacity is unknown, broadcasts fresh slot_capacity once known, and never retroactively rejects it (QA-021/D9)", async () => {
+    const { port, token } = await start();
+
+    // Registers before the Stream Deck plugin has ever connected/reported capacity -
+    // "B5" is canonically formed but its range can't be checked yet, so it's accepted
+    // provisionally.
+    const app = await TestDoubleClient.connectAndRegister(port, token, "test-app", {
+      B1: { label: "Fixture A" },
+      B5: { label: "Maybe Out Of Range" },
+    } as unknown as RegisterContent);
+    clients.push(app);
+
+    const [initialCapacity] = await app.waitForMessageType("slot_capacity");
+    expect(initialCapacity.payload).toEqual({ buttonSlots: null, dialSlots: null });
+    // No error for "B5" - it was accepted, not rejected, while capacity was unknown.
+    expect(app.received.filter((m) => m.type === "error")).toHaveLength(0);
+
+    // Stream Deck plugin now connects and reports a capacity that makes "B5" actually
+    // out of range (only one button slot, "B1").
+    const streamDeck = await registerStreamDeck(port, token);
+    clients.push(streamDeck);
+
+    // The already-connected app plugin gets a fresh, unsolicited slot_capacity without
+    // re-registering or re-focusing.
+    const capacityMessages = await app.waitForMessageType("slot_capacity", 2);
+    expect(capacityMessages[1]?.payload).toEqual({ buttonSlots: 1, dialSlots: 1 });
+
+    // D9: no retroactive rejection - still no `error` message ever arrives for "B5",
+    // and the connection's declared content is untouched; it simply never renders
+    // (exactly like any other out-of-range/undeclared label) rather than being
+    // actively dropped or re-reported.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(app.received.filter((m) => m.type === "error")).toHaveLength(0);
   });
 
   it("sends the idle render sweep to the Stream Deck connection once it re-registers after device_capacity is known", async () => {

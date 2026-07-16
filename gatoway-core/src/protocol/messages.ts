@@ -195,14 +195,30 @@ export interface DeviceCapacityPayload {
 /**
  * Sent by Gatoway core to an application plugin, reporting how many button/dial slots
  * the connected device physically has - bare counts only, derived from the most recent
- * `device_capacity` report (design.md D2). An application plugin derives its own valid
- * label set (`"B1".."B<buttonSlots>"`, `"D1".."D<dialSlots>"`) from these counts using
- * the documented labeling convention; the actual label strings are never enumerated
- * over the wire, since both sides derive them identically from the same counts. Sent
- * once immediately after that connection's own successful `register_ack`, and again
- * every time Gatoway core records that connection as newly focused.
+ * `device_capacity` report (design.md D2, amended v1.8 for QA-021). An application
+ * plugin derives its own valid label set (`"B1".."B<buttonSlots>"`,
+ * `"D1".."D<dialSlots>"`) from these counts, once known, using the documented labeling
+ * convention; the actual label strings are never enumerated over the wire, since both
+ * sides derive them identically from the same counts.
+ *
+ * `null` means capacity is **not yet known** - no `device_capacity` report has ever
+ * been received (e.g. Gatoway core was spawned by the Stream Deck plugin, which has
+ * connected back but hasn't reported its device's capacity yet, while an
+ * application plugin has already registered). This is deliberately distinct from a
+ * known `0`, which means the device is known to genuinely have none of that control
+ * type - collapsing both into `0` (the pre-v1.8 shape) meant a plugin that registered
+ * before capacity was ever known had its content permanently rejected as "out of
+ * range," with no path to recovery (QA-021).
+ *
+ * Sent once immediately after that connection's own successful `register_ack`, again
+ * every time Gatoway core records that connection as newly focused, and again,
+ * unsolicited, to every currently-connected application plugin the first time real
+ * capacity becomes known after having been unknown, and on any subsequent
+ * `device_capacity` change (design.md D2's broadcast rule) - not just to whichever
+ * connection's own register/focus-gain happened to trigger the underlying
+ * `device_capacity` report.
  */
 export interface SlotCapacityPayload {
-  buttonSlots: number;
-  dialSlots: number;
+  buttonSlots: number | null;
+  dialSlots: number | null;
 }

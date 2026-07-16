@@ -98,8 +98,97 @@ describe("ProfileRouter", () => {
       router.handleRegistered(receiver);
 
       expect(receiverSent).toEqual([
-        { type: "slot_capacity", connectionId: receiver.id, payload: { buttonSlots: 0, dialSlots: 0 } },
+        {
+          type: "slot_capacity",
+          connectionId: receiver.id,
+          payload: { buttonSlots: null, dialSlots: null },
+        },
       ]);
+    });
+  });
+
+  describe("slot_capacity broadcast (QA-021)", () => {
+    it("broadcasts a fresh slot_capacity to every already-connected application plugin the first time capacity becomes known", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
+
+      // Two application plugins register before the Stream Deck plugin has ever
+      // reported device_capacity - both see unknown (null) counts at register time.
+      const appASent: unknown[] = [];
+      const appA = acceptConnection(manager, appASent);
+      manager.transition(appA.id, "authenticated");
+      manager.setPluginInfo(appA.id, "test-app-a", {});
+      router.handleRegistered(appA);
+
+      const appBSent: unknown[] = [];
+      const appB = acceptConnection(manager, appBSent);
+      manager.transition(appB.id, "authenticated");
+      manager.setPluginInfo(appB.id, "test-app-b", {});
+      router.handleRegistered(appB);
+
+      appASent.length = 0;
+      appBSent.length = 0;
+
+      // Stream Deck plugin registers and reports its first-ever device_capacity.
+      const streamDeck = acceptConnection(manager, []);
+      manager.transition(streamDeck.id, "authenticated");
+      manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, {});
+      router.handleDeviceCapacity(streamDeck, DEVICE_CAPACITY);
+
+      // Both already-connected application plugins get a fresh, unsolicited
+      // slot_capacity - without re-registering or re-focusing.
+      expect(appASent).toEqual([
+        { type: "slot_capacity", connectionId: appA.id, payload: { buttonSlots: 1, dialSlots: 1 } },
+      ]);
+      expect(appBSent).toEqual([
+        { type: "slot_capacity", connectionId: appB.id, payload: { buttonSlots: 1, dialSlots: 1 } },
+      ]);
+    });
+
+    it("broadcasts a fresh slot_capacity to every connected application plugin again when the device itself subsequently changes", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
+
+      const streamDeck = registerStreamDeck(router, manager, []);
+
+      const appSent: unknown[] = [];
+      const app = acceptConnection(manager, appSent);
+      manager.transition(app.id, "authenticated");
+      manager.setPluginInfo(app.id, "test-app", {});
+      router.handleRegistered(app);
+      appSent.length = 0;
+
+      // Device changes (e.g. swapped for a larger model) - a further device_capacity
+      // report broadcasts again, without app needing to re-register or re-focus.
+      router.handleDeviceCapacity(streamDeck, MULTI_DEVICE_CAPACITY);
+
+      expect(appSent).toEqual([
+        { type: "slot_capacity", connectionId: app.id, payload: { buttonSlots: 3, dialSlots: 2 } },
+      ]);
+    });
+
+    it("does not broadcast to the Stream Deck connection itself, or to a not-yet-registered connection", () => {
+      const logger = fakeLogger();
+      const manager = new ConnectionManager(logger);
+      const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
+
+      const streamDeckSent: unknown[] = [];
+      const streamDeck = acceptConnection(manager, streamDeckSent);
+      manager.transition(streamDeck.id, "authenticated");
+      manager.setPluginInfo(streamDeck.id, STREAM_DECK_PLUGIN_TYPE, {});
+
+      // A connection that has connected but not yet completed registration (no
+      // pluginType set) must not receive a broadcast.
+      const unregisteredSent: unknown[] = [];
+      acceptConnection(manager, unregisteredSent);
+
+      streamDeckSent.length = 0;
+      router.handleDeviceCapacity(streamDeck, DEVICE_CAPACITY);
+
+      expect(streamDeckSent.filter((m) => (m as { type: string }).type === "slot_capacity")).toEqual([]);
+      expect(unregisteredSent).toEqual([]);
     });
   });
 
@@ -108,7 +197,7 @@ describe("ProfileRouter", () => {
       const logger = fakeLogger();
       const manager = new ConnectionManager(logger);
       const router = new ProfileRouter({ manager, focusTracker: new FocusTracker(logger), logger });
-      expect(router.getSlotCapacity()).toEqual({ buttonSlots: 0, dialSlots: 0 });
+      expect(router.getSlotCapacity()).toEqual({ buttonSlots: null, dialSlots: null });
 
       registerStreamDeck(router, manager, [], MULTI_DEVICE_CAPACITY);
 
@@ -432,7 +521,11 @@ describe("ProfileRouter", () => {
       router.handleRegistered(app);
 
       expect(sent).toEqual([
-        { type: "slot_capacity", connectionId: app.id, payload: { buttonSlots: 0, dialSlots: 0 } },
+        {
+          type: "slot_capacity",
+          connectionId: app.id,
+          payload: { buttonSlots: null, dialSlots: null },
+        },
       ]);
     });
   });

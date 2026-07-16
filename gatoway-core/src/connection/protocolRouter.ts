@@ -37,10 +37,12 @@ export interface ProtocolRouter {
   handleDeviceCapacity(connection: ConnectionRecord, payload: DeviceCapacityPayload): void;
   /**
    * Returns the current button/dial slot counts, derived from the most recently
-   * reported `device_capacity` (design.md D2/D4, amended v1.7 for QA-020): both zero if
-   * none has ever been received. `messageHandler.ts` uses this at `register` time to
-   * validate that each declared content-map key is a currently-valid label for the
-   * device's actual capacity, not just correctly value-shaped.
+   * reported `device_capacity` (design.md D2/D4, amended v1.7 for QA-020, further
+   * amended v1.8 for QA-021): `null` for either dimension not yet known (no
+   * `device_capacity` report has ever been received) - distinct from a known `0`.
+   * `messageHandler.ts` uses this at `register` time to validate that each declared
+   * content-map key is a currently-valid label for the device's actual capacity (when
+   * known), not just correctly value-shaped.
    */
   getSlotCapacity(): SlotCapacityPayload;
 }
