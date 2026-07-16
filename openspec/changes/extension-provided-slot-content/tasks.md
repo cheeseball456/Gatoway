@@ -169,3 +169,18 @@ in full before starting; do not rely on memory of the v1.7-only model.
       `null`/unknown state, the canonical-label-form requirement, and the broadcast
       behavior.
 - [x] 11.9 Full test suite + typecheck, both workspaces.
+- [x] 11.10 Close QA-023 (Minor, test-coverage gap): the QA-021/D9 integration test
+      (`focusProfileRouting.integration.test.ts`) confirmed no `error` is ever sent for
+      a canonically-formed-but-out-of-range label accepted while capacity was unknown,
+      but no test also drove a subsequent render sweep to confirm that label never
+      actually renders once real capacity is known (structurally identical to the
+      already-tested QA-019 overflow case, just not exercised for this specific
+      unknown-to-known transition). Extended that same test: after the capacity-known
+      broadcast and the no-`error` assertion, the app connection now also sends
+      `focus: true`, and the test asserts the resulting sweep is exactly the two
+      physical positions (one keypad, one encoder) with the in-range label ("Fixture
+      A") present and the out-of-range label ("Maybe Out Of Range" / "B5") absent from
+      every render_update ever received. No production code changed - confirmed by
+      direct tracing (`sendContentSweepForController` iterates `positionsFor`, bounded
+      by the latest `device_capacity`, never by declared content keys) that this was a
+      coverage gap, not a functional defect, before writing the test.

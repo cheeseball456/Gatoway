@@ -192,7 +192,7 @@ describe("focus tracking + profile routing (integration)", () => {
     expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(0);
   });
 
-  it("accepts a canonically-formed but potentially out-of-range label while capacity is unknown, broadcasts fresh slot_capacity once known, and never retroactively rejects it (QA-021/D9)", async () => {
+  it("accepts a canonically-formed but potentially out-of-range label while capacity is unknown, broadcasts fresh slot_capacity once known, never retroactively rejects it, and never renders it once a real render sweep runs (QA-021/D9, QA-023)", async () => {
     const { port, token } = await start();
 
     // Registers before the Stream Deck plugin has ever connected/reported capacity -
@@ -225,6 +225,28 @@ describe("focus tracking + profile routing (integration)", () => {
     // actively dropped or re-reported.
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(app.received.filter((m) => m.type === "error")).toHaveLength(0);
+
+    // QA-023: combine the above with an actual render sweep, not just the absence of
+    // an `error`. Gaining focus now (capacity known, one button/one dial slot) must
+    // produce exactly one render_update per physical position - the in-range "B1"
+    // renders its real content, and "B5" (out of range for the real, now-known
+    // capacity) must never appear anywhere in the sweep, regardless of having been
+    // accepted provisionally while capacity was unknown. This is structurally the same
+    // guarantee QA-019's overflow test already proves for content declared after
+    // capacity was known from the start (profileRouter.test.ts); this test proves it
+    // specifically for the unknown-at-registration-time transition D9 describes.
+    app.send({ type: "focus", payload: { focused: true } });
+    const sweep = await streamDeck.waitForMessageType("render_update", 2);
+    expect(sweep).toHaveLength(2);
+    const labels = sweep.map((m) => (m.payload as { label?: string }).label);
+    expect(labels).toContain("Fixture A");
+    expect(labels).not.toContain("Maybe Out Of Range");
+
+    // No further render_update ever arrives for "B5" - the sweep is exhaustive at
+    // exactly the physical capacity (one keypad position, one encoder position), never
+    // one extra for the out-of-range declared label.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(streamDeck.received.filter((m) => m.type === "render_update")).toHaveLength(2);
   });
 
   it("sends the idle render sweep to the Stream Deck connection once it re-registers after device_capacity is known", async () => {
