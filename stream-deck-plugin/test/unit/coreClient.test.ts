@@ -38,7 +38,7 @@ async function flush(times = 5): Promise<void> {
 }
 
 describe("CoreClient", () => {
-  it("connects, registers as plugin type 'stream-deck' with an empty capability manifest, and presents the token", async () => {
+  it("connects, registers as plugin type 'stream-deck' with no declared content, and presents the token", async () => {
     const logger = fakeLogger();
     const socket = fakeSocket();
     const client = new CoreClient({
@@ -57,7 +57,7 @@ describe("CoreClient", () => {
     const sent = JSON.parse(socket.written[0] as string);
     expect(sent).toEqual({
       type: "register",
-      payload: { pluginType: "stream-deck", capabilities: [], token: "the-token" },
+      payload: { pluginType: "stream-deck", token: "the-token" },
     });
   });
 
@@ -265,6 +265,109 @@ describe("CoreClient", () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("dropping input_event"),
       expect.objectContaining({ event: "core_client_input_event_dropped" }),
+    );
+  });
+
+  it("invokes onRegistered once a register_ack with status 'ok' arrives", async () => {
+    const logger = fakeLogger();
+    const socket = fakeSocket();
+    const onRegistered = vi.fn();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => socket,
+      readToken: async () => "token",
+      onRegistered,
+    });
+
+    client.start();
+    await flush();
+    socket.emit("connect");
+    expect(onRegistered).not.toHaveBeenCalled();
+    socket.emit(
+      "data",
+      `${JSON.stringify({ type: "register_ack", payload: { status: "ok", connectionId: "abc" } })}\n`,
+    );
+
+    expect(onRegistered).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invoke onRegistered when registration is rejected", async () => {
+    const logger = fakeLogger();
+    const socket = fakeSocket();
+    const onRegistered = vi.fn();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => socket,
+      readToken: async () => "token",
+      scheduleReconnect: immediateSchedule(),
+      onRegistered,
+    });
+
+    client.start();
+    await flush();
+    socket.emit("connect");
+    socket.emit(
+      "data",
+      `${JSON.stringify({
+        type: "register_ack",
+        payload: { status: "rejected", connectionId: "abc", reason: "invalid_token" },
+      })}\n`,
+    );
+    await flush();
+
+    expect(onRegistered).not.toHaveBeenCalled();
+  });
+
+  it("sends a well-formed device_capacity message once connected", async () => {
+    const logger = fakeLogger();
+    const socket = fakeSocket();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => socket,
+      readToken: async () => "token",
+    });
+
+    client.start();
+    await flush();
+    socket.emit("connect");
+    socket.emit(
+      "data",
+      `${JSON.stringify({ type: "register_ack", payload: { status: "ok", connectionId: "abc" } })}\n`,
+    );
+
+    client.sendDeviceCapacity({
+      buttonPositions: [{ row: 0, column: 0 }],
+      dialPositions: [{ index: 0 }],
+    });
+
+    expect(socket.written).toHaveLength(2); // register, then device_capacity
+    expect(JSON.parse(socket.written[1] as string)).toEqual({
+      type: "device_capacity",
+      payload: { buttonPositions: [{ row: 0, column: 0 }], dialPositions: [{ index: 0 }] },
+    });
+  });
+
+  it("drops a device_capacity report (logging a warning) rather than sending it while not connected", async () => {
+    const logger = fakeLogger();
+    const client = new CoreClient({
+      port: 47821,
+      tokenFilePath: "/fake/token",
+      logger,
+      connectFn: () => fakeSocket(),
+      readToken: async () => "token",
+    });
+
+    client.sendDeviceCapacity({ buttonPositions: [], dialPositions: [] });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("dropping device_capacity"),
+      expect.objectContaining({ event: "core_client_device_capacity_dropped" }),
     );
   });
 

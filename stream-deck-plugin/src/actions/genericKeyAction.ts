@@ -13,9 +13,9 @@ import {
 } from "./genericKeyRenderer.js";
 import { keypadPosition, positionsMatch } from "./protocolPositions.js";
 import type { RenderStore } from "./renderStore.js";
+import { GENERIC_KEY_ACTION_UUID } from "./actionIds.js";
 
-/** Must match the `UUID` declared for this action in `manifest.json` (design.md D5). */
-export const GENERIC_KEY_ACTION_UUID = "com.gatoway.streamdeck.key";
+export { GENERIC_KEY_ACTION_UUID };
 
 /**
  * Gatoway's generic, position-based Keypad action (AD-8, design.md D5, superseding

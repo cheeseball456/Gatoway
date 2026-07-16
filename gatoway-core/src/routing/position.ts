@@ -9,9 +9,9 @@ export function isKeypadPosition(position: Position): position is { row: number;
  * Structural equality between two `Position` values, correctly distinguishing a keypad
  * `{ row, column }` from an encoder `{ index }` even when their numeric fields happen to
  * coincide (e.g. keypad `{row:0,column:0}` vs encoder `{index:0}` must never match).
- * Shared by `LayoutStore` and the config-backed `LayoutResolver` (both need to compare
- * bound positions), and mirrors the equality check `testFixtureLayoutResolver.ts` used
- * before this change replaced it.
+ * Used by `profileRouter.ts` to resolve an `input_event`'s reported position against the
+ * Stream Deck plugin's latest `device_capacity` report (extension-provided-slot-content
+ * design.md D6).
  */
 export function samePosition(a: Position, b: Position): boolean {
   if (isKeypadPosition(a) && isKeypadPosition(b)) {

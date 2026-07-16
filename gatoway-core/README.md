@@ -9,27 +9,27 @@ protocol.
 This package implements the connection/authentication/protocol/logging foundation
 (`gatoway-core-foundation`) plus focus tracking (which single connection, if any,
 currently has focus), profile routing (resolving physical Stream Deck input against the
-focused connection's bound capability and forwarding a `command`), live capability
-display updates (`capability_update`), and, as of `persisted-layout-config`, a real,
-file-backed layout config that determines which position resolves to which capability
-per plugin type (see [Layout config file](#layout-config-file) below). See
+focused connection's own declared content and forwarding a `command`), and live
+slot-capacity tracking: the Stream Deck plugin reports its connected device's live
+button/dial slot capacity (`device_capacity`), and Gatoway core forwards each
+application plugin the counts (`slot_capacity`) and resolves that plugin's ordinally-
+addressed `content` against physical positions on its behalf (`extension-provided-slot-
+content`; see [Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+in the protocol reference). Gatoway core persists no app-specific configuration to disk
+— only the auth token file and rotating logs. See
 [Current Scope and Limitations](#current-scope-and-limitations) for what is deliberately
 not yet built.
 
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
 and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract, see
 [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — the reference an application plugin
-author should build against, rather than this package's own source. For the layout
-config file's schema, location, and a worked example, see
-[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md). For the detailed capability
-specs this package implements, see [`openspec/specs/`](../openspec/specs/)
+author should build against, rather than this package's own source. For the detailed
+capability specs this package implements, see [`openspec/specs/`](../openspec/specs/)
 (`connection-management`, `plugin-authentication`, `message-protocol`,
 `diagnostics-logging`, `focus-tracking`, `profile-routing`, `stream-deck-idle-display`,
 `stream-deck-core-client`, `stream-deck-core-lifecycle`) — consolidated there once each
 introducing change is archived; see [`openspec/changes/archive/`](../openspec/changes/archive/)
-for those changes' original proposals and design records, and
-[`openspec/changes/persisted-layout-config/`](../openspec/changes/persisted-layout-config/)
-for the layout-persistence change (not yet archived at the time of writing).
+for those changes' original proposals and design records.
 
 ## Requirements
 
@@ -91,7 +91,6 @@ the running instance.
 | `GATOWAY_WS_PORT` | `47822` | Port the WebSocket listener binds on `127.0.0.1` |
 | `GATOWAY_CONFIG_DIR` | Per-OS user config dir (see below) | Base directory for the auth token file, if `GATOWAY_TOKEN_FILE` isn't set |
 | `GATOWAY_TOKEN_FILE` | `<config dir>/auth-token` | Path to the auth token file (native/TCP plugins read this to authenticate) |
-| `GATOWAY_LAYOUT_FILE` | `<config dir>/layout.json` | Path to the layout config file (position-to-capability bindings, per plugin type); see [Layout config file](#layout-config-file) |
 | `GATOWAY_ALLOWED_ORIGINS` | *(empty — fail closed)* | Comma-separated list of allowlisted WebSocket `Origin` values. Each entry is either an exact match (e.g. `chrome-extension://<id>`) or a trailing-wildcard prefix match (e.g. `moz-extension://*`) — see [Auth token file](#auth-token-file) below for which to use per browser. No origins are allowed by default, so no WebSocket connection succeeds until this is set |
 | `GATOWAY_LOG_DIR` | Per-OS user log dir (see below) | Base directory for the log file, if `GATOWAY_LOG_FILE` isn't set |
 | `GATOWAY_LOG_FILE` | `<log dir>/gatoway-core.log` | Path to the active rotating log file |
@@ -136,27 +135,24 @@ exact match, unchanged from before wildcard support was added
 
 Set both, comma-separated, to support both browsers: `GATOWAY_ALLOWED_ORIGINS=chrome-extension://<id>,moz-extension://*`.
 
-### Layout config file
+### No layout config file
 
-At startup, Gatoway core also loads a local JSON layout config file (`layoutFilePath`
-above, `persisted-layout-config`) mapping physical Stream Deck positions to application
-capability ids, per plugin type — this is what actually determines what a connected
-plugin's declared capabilities render as on the device. It is read exactly once, at
-startup; hand-edit it and restart Gatoway core to pick up changes.
-
-A missing file (fresh install) or a malformed one is never fatal: Gatoway core starts
-with an empty layout (every position unbound) either way, and logs a clear message
-identifying what happened and, for a missing file, the expected path. See
-[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the full JSON schema, the
-missing/malformed-file log events, and a worked example — this is the reference a
-developer hand-authoring a config for a real application plugin (Lightroom, xDesign, or
-this package's own manual test-app client) needs.
+As of `extension-provided-slot-content`, Gatoway core persists **no** app-specific
+configuration to disk — the earlier `layout.json` file (hand-authoring a position ->
+capability-id mapping per plugin type) has been removed entirely, along with its
+supporting code (`layoutConfig.ts`, `layoutStore.ts`) and the `GATOWAY_LAYOUT_FILE`
+environment variable. Physical slot capacity is now reported live by the Stream Deck
+plugin, and each connected application plugin declares its own content sized to fit,
+addressed purely by ordinal position — see
+[Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+in the protocol reference for the full mechanism. If you have an old `layout.json` file
+from before this change, it is simply no longer read and can be deleted.
 
 ## Manual test clients
 
 Two scripts let you exercise the accept/reject behavior of each listener against a
 running Gatoway core instance, without a real plugin (a third, described further below,
-exercises the focus/routing/capability-update mechanism instead). Start Gatoway core
+exercises the focus/routing/live-content-update mechanism instead). Start Gatoway core
 first (`npm run dev`), then in another terminal:
 
 ```bash
@@ -176,28 +172,27 @@ Both scripts print the observed `register_ack` (or upgrade-refusal) result for e
 attempt, and honor the same `GATOWAY_*` environment variables as Gatoway core itself, so
 they find the running instance's port and token file by default.
 
-A third script, added by `focus-profile-routing`, stands in for a real application
-plugin so focus tracking, profile routing, and live capability updates can be exercised
-end to end — including against real Stream Deck+ hardware, via the actual Stream Deck
-plugin connected as the display client:
+A third script stands in for a real application plugin so focus tracking, profile
+routing, and live content updates can be exercised end to end — including against real
+Stream Deck+ hardware, via the actual Stream Deck plugin connected as the display
+client:
 
 ```bash
 npm run manual:test-app-client
 ```
 
-It registers a small fixture set of capabilities under `pluginType: "test-app"` and
-accepts `focus` / `blur` / `update` / `quit` commands typed at the prompt — see
+It registers a small fixture `content` (two buttons, one dial — addressed only by
+ordinal position, never an id) under `pluginType: "test-app"`, and accepts `focus` /
+`blur` / `update` / `quit` commands typed at the prompt — see
 [`stream-deck-plugin/README.md`](../stream-deck-plugin/README.md#exercising-the-mechanism-without-a-real-application-plugin)
 for the full walkthrough of what each command does.
 
-**These fixture capabilities only render on a physical key/dial if a layout config binds
-them to a position** — as of `persisted-layout-config`, position → capability bindings
-come from the real layout config file (see [Layout config file](#layout-config-file)
-above), not a hardcoded fixture. `test/manual/testAppClient.ts`'s own header comment
-documents the exact config snippet to hand-author for its fixture ids; without it (or
-with the wrong plugin type/positions/ids), the script still connects and registers fine,
-but `focus`/`update` simply have nothing bound to actually display — a safe no-op, not
-an error.
+**No layout config file is needed to see this render anymore.** Gatoway core resolves
+this client's declared content directly against whatever physical button/dial slots the
+Stream Deck plugin reports via `device_capacity` — place at least two generic Key
+actions and one generic Dial action on the connected device to see the full fixture; any
+extra declared entries beyond what's currently placed simply aren't rendered anywhere
+(safe underflow, matching `REQUIREMENTS.md` FR-007).
 
 ## Message protocol
 
@@ -210,9 +205,10 @@ Every message, on either transport, shares one JSON envelope:
 - **TCP:** newline-delimited JSON — one JSON object per line.
 - **WebSocket:** one JSON object per text frame.
 
-The full message set, as of `focus-profile-routing`:
-- `register` (plugin → core): declares `pluginType` and a `capabilities` manifest
-  (button/dial actions the plugin supports); TCP clients also include their auth `token`.
+The full message set, as of `extension-provided-slot-content`:
+- `register` (plugin → core): declares `pluginType` and ordinally-addressed `content`
+  (`{ buttons: SlotContent[], dials: SlotContent[] }`); TCP clients also include their
+  auth `token`. Re-sending `register` is the only mechanism for any content change.
 - `register_ack` (core → plugin): `status: "ok" | "rejected"`, the assigned
   `connectionId`, and a `reason` on rejection.
 - `error` (either direction): a protocol-level error report.
@@ -224,28 +220,29 @@ The full message set, as of `focus-profile-routing`:
 - `render_update` (core → Stream Deck plugin): what to display at a given position
   (icon/label/state), including the built-in idle appearance when nothing is focused.
 - `command` (core → focused application connection): an `input_event` resolved against
-  that connection's bound capability.
-- `capability_update` (application plugin → core): lets a plugin push a live
-  icon/label/state change to one of its own already-declared capabilities at any time
-  after registration (satisfies `REQUIREMENTS.md` FR-001).
+  an ordinal index within that connection's own declared content.
+- `device_capacity` (Stream Deck plugin → core): the ordered list of physical positions
+  currently holding a generic Key/Dial action.
+- `slot_capacity` (core → application plugin): how many button/dial slots that
+  connection currently has to fill, derived from the latest `device_capacity` report.
 
 See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full reference — envelope,
-every payload shape, the `icon` field's null-vs-omitted reset semantics, and practical
-icon/label content guidance — rather than the abbreviated summary above. The
-[`message-protocol` spec](../openspec/specs/message-protocol/spec.md) now covers the
-full message set, consolidated after both `gatoway-core-foundation` (the original
-`register`/`register_ack`/`error` set) and `focus-profile-routing` (the five message
-types added since) were archived.
+every payload shape, the `icon` field's null-vs-omitted reset semantics, pixel-dimension
+guidance, and how ordinal-index resolution actually works — rather than the abbreviated
+summary above. The [`message-protocol` spec](../openspec/specs/message-protocol/spec.md)
+covers the full, current message set, consolidated as each introducing/superseding
+change is archived.
 
 ## Logging
 
 Gatoway core writes structured, newline-delimited JSON log entries to the rotating log
 file described above. Logged events include connection lifecycle (accepted,
 authenticated, disconnected), authentication successes/failures, plugin registration
-(including the declared capability manifest), and every message sent/received on an
-authenticated connection. Rotation is size-based (`GATOWAY_LOG_MAX_SIZE_BYTES`), keeping
-a bounded number of rotated files (`GATOWAY_LOG_MAX_FILES`) — logs are for short-term,
-active debugging, not long-term archival.
+(including the declared content), live slot-capacity updates, and every message
+sent/received on an authenticated connection. Rotation is size-based
+(`GATOWAY_LOG_MAX_SIZE_BYTES`), keeping a bounded number of rotated files
+(`GATOWAY_LOG_MAX_FILES`) — logs are for short-term, active debugging, not long-term
+archival.
 
 ## Running the automated test suite
 
@@ -258,39 +255,41 @@ npm run typecheck  # tsc --noEmit
 ## Current scope and limitations
 
 This package now implements the core foundation (`gatoway-core-foundation`, the first
-change in Gatoway's delivery sequence), focus tracking, profile routing, and live
-capability updates (`focus-profile-routing`, delivery-sequence step 4), and a real,
-file-backed layout config (`persisted-layout-config`, delivery-sequence step 6; see
+change in Gatoway's delivery sequence), focus tracking, profile routing (originally
+`focus-profile-routing`), and extension-provided slot content plus live slot-capacity
+tracking (`extension-provided-slot-content`, delivery-sequence step 7 — see
 `../ARCHITECTURE.md`'s Delivery Sequence). As of the most recent change:
 
 - **A Stream Deck plugin now exists** ([`../stream-deck-plugin/`](../stream-deck-plugin/))
-  that spawns, supervises, and connects to Gatoway core as a client, and renders
-  Gatoway's generic, position-based Key/Dial actions on physical Stream Deck hardware —
-  including the built-in idle appearance when nothing is focused. It registers with an
-  empty capability manifest of its own (it is the display client, not an application
-  connection) — see that package's own README for its scope.
-- **Focus tracking and profile routing now work end to end.** Gatoway core tracks which
-  single connection (if any) currently has focus, resolves physical `input_event`s
-  against that connection's bound capability, forwards resolved `command`s, and keeps
-  the Stream Deck plugin's display in sync with focus changes, falling back to the idle
-  appearance when nothing is focused.
-- **Live capability updates work.** A connection can push a `capability_update` for one
-  of its own already-declared capabilities at any time after registration, and Gatoway
-  core immediately re-renders it on the Stream Deck if that connection is currently
-  focused (`REQUIREMENTS.md` FR-001).
-- **Position → capability bindings are now real, file-backed config**, not an in-code
-  fixture. Gatoway core loads a local JSON layout config file at startup, keyed by
-  plugin type — see [Layout config file](#layout-config-file) above and
-  [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the schema and a worked
-  example. Only reading/loading is wired into Gatoway core's own startup; the
-  write path (`LayoutStore.setBinding()`/`removeBinding()`/`save()`) exists but has no
-  caller yet — it's forward-looking API surface for a future no-code mapping UI
-  (post-MVP, undesigned).
+  that spawns, supervises, and connects to Gatoway core as a client, renders Gatoway's
+  generic, position-based Key/Dial actions on physical Stream Deck hardware — including
+  the built-in idle appearance when nothing is focused — and reports the device's live
+  slot capacity. It registers with no declared `content` of its own (it is the display
+  client, not an application connection) — see that package's own README for its scope.
+- **Focus tracking and profile routing work end to end, entirely by ordinal position.**
+  Gatoway core tracks which single connection (if any) currently has focus, resolves
+  physical `input_event`s against an ordinal index within that connection's own declared
+  content (via the Stream Deck plugin's live `device_capacity` report), forwards
+  resolved `command`s, and keeps the Stream Deck plugin's display in sync with focus
+  changes, falling back to the idle appearance when nothing is focused.
+- **Live content updates work by re-sending `register`.** A connection updates its own
+  displayed content — a live label/state change, paging, entering/leaving a nested group
+  — by re-sending `register` with its complete, current `content` at any time after
+  initial registration; Gatoway core immediately re-renders it on the Stream Deck if
+  that connection is currently focused (`REQUIREMENTS.md` FR-001/FR-008). There is no
+  separate, lighter-weight update message.
+- **No host-side layout config file exists anymore.** Gatoway core persists nothing
+  app-specific to disk. Physical slot capacity is reported live by the Stream Deck
+  plugin (`device_capacity`) and forwarded to each application plugin as counts
+  (`slot_capacity`); each plugin declares content sized to fit, addressed purely by
+  ordinal position — see
+  [Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+  in the protocol reference for the full mechanism. This supersedes the earlier
+  `persisted-layout-config` change's `layout.json` file entirely.
 - **No real application plugins exist yet** (no Lightroom adapter, no xDesign/xDender
-  browser extension) — `focus-profile-routing`/`persisted-layout-config` prove the
-  mechanism using a manual test-double client (`test/manual/testAppClient.ts`; see
-  [Manual test clients](#manual-test-clients)) and live verification against real
-  Stream Deck+ hardware, not a real second application.
+  browser extension) — this mechanism is proven using a manual test-double client
+  (`test/manual/testAppClient.ts`; see [Manual test clients](#manual-test-clients)) and
+  live verification against real Stream Deck+ hardware, not a real second application.
 
 ## Known open items (see `QA_REPORT.md`)
 

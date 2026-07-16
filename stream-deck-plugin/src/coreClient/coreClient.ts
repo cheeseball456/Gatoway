@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import type {
+  DeviceCapacityPayload,
   GatowayMessage,
   InputEventPayload,
   RegisterAckPayload,
@@ -52,6 +53,13 @@ export interface CoreClientOptions {
    * displayed content in sync with whichever connection currently has focus.
    */
   onRenderUpdate?: (payload: RenderUpdatePayload) => void;
+  /**
+   * Invoked once immediately after this connection completes registration with Gatoway
+   * core (extension-provided-slot-content design.md D1, tasks.md 7.2) - `plugin.ts` uses
+   * this to send the Stream Deck plugin's own initial `device_capacity` report, since it
+   * must be sent "once at that connection's own registration".
+   */
+  onRegistered?: () => void;
 }
 
 function defaultConnect(port: number, host: string): Socket {
@@ -70,9 +78,10 @@ function defaultScheduleReconnect(delayMs: number, fn: () => void): () => void {
 /**
  * Connects to Gatoway core's TCP listener as an authenticated client, using exactly the
  * existing `register`/`register_ack` handshake (design.md D3, stream-deck-core-client
- * spec): presents the current token, declares plugin type `stream-deck` with an empty
- * capability manifest (nothing to act on yet), and retries with backoff on disconnect
- * or rejection.
+ * spec): presents the current token, declares plugin type `stream-deck` with no
+ * declared `content` (it is the display client, not an application connection with its
+ * own ordinally-addressed content), and retries with backoff on disconnect or
+ * rejection.
  */
 export class CoreClient {
   private readonly logger: PluginLogger;
@@ -86,6 +95,7 @@ export class CoreClient {
   private readonly now: () => number;
   private readonly initialGracePeriodMs: number;
   private readonly onRenderUpdate: ((payload: RenderUpdatePayload) => void) | undefined;
+  private readonly onRegistered: (() => void) | undefined;
 
   private state: CoreClientState = "disconnected";
   private socket: Socket | undefined;
@@ -107,6 +117,7 @@ export class CoreClient {
     this.now = options.now ?? Date.now;
     this.initialGracePeriodMs = options.initialGracePeriodMs ?? DEFAULT_INITIAL_GRACE_PERIOD_MS;
     this.onRenderUpdate = options.onRenderUpdate;
+    this.onRegistered = options.onRegistered;
   }
 
   /** The client's current connection state. */
@@ -136,6 +147,26 @@ export class CoreClient {
       return;
     }
     const message: GatowayMessage<InputEventPayload> = { type: "input_event", payload };
+    this.socket.write(encodeNdjsonLine(message));
+  }
+
+  /**
+   * Sends a `device_capacity` report to Gatoway core (extension-provided-slot-content
+   * design.md D1, tasks.md 7.2/7.3): the ordered list of physical positions currently
+   * holding this plugin's own generic Key/Dial actions. Dropped (logged, not queued) when
+   * not currently connected - Gatoway core will get a fresh report once this connection
+   * re-registers anyway (design.md D1: "sent once at that connection's own
+   * registration").
+   */
+  sendDeviceCapacity(payload: DeviceCapacityPayload): void {
+    if (this.state !== "connected" || !this.socket) {
+      this.logger.warn("dropping device_capacity: not connected to Gatoway core", {
+        event: "core_client_device_capacity_dropped",
+        payload,
+      });
+      return;
+    }
+    const message: GatowayMessage<DeviceCapacityPayload> = { type: "device_capacity", payload };
     this.socket.write(encodeNdjsonLine(message));
   }
 
@@ -197,7 +228,10 @@ export class CoreClient {
 
     socket.once("connect", () => {
       this.state = "authenticating";
-      const payload: RegisterPayload = { pluginType: PLUGIN_TYPE, capabilities: [], token };
+      // The Stream Deck plugin's own connection declares no `content` (design.md D3,
+      // AD-8): it is the one display client Gatoway core sends `render_update` to, not
+      // an application connection with its own ordinally-addressed content to declare.
+      const payload: RegisterPayload = { pluginType: PLUGIN_TYPE, token };
       const message: GatowayMessage<RegisterPayload> = { type: "register", payload };
       socket.write(encodeNdjsonLine(message));
     });
@@ -261,6 +295,7 @@ export class CoreClient {
         event: "core_client_connected",
         connectionId: payload.connectionId,
       });
+      this.onRegistered?.();
       return;
     }
 

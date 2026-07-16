@@ -5,38 +5,33 @@ Gatoway core as a child process, connects to it as an authenticated TCP client, 
 renders Gatoway's key(s) on physical Elgato Stream Deck hardware via the official Elgato
 Stream Deck SDK.
 
-As of the `focus-profile-routing` change, this package implements Gatoway's generic,
-position-based action model (`ARCHITECTURE.md` AD-8): two generic actions, **Key**
-(keypad positions) and **Dial** (encoder/dial positions), whose displayed content and
-behavior are fully controlled by Gatoway core. Neither action has any app-specific or
-even idle-specific knowledge baked into it — the plugin only forwards raw physical
-events (`input_event`) and renders whatever Gatoway core instructs (`render_update`),
-including the built-in idle appearance shown when no application currently has focus.
-This replaces the earlier `stream-deck-plugin-skeleton` change's single static "Idle"
-action, which is no longer part of the plugin (see
-[Placing the generic actions](#placing-the-generic-actions-manual-one-time) and
-[Migrating from the old Idle action](#migrating-from-the-old-idle-action) below). There
-is still no application-specific plugin work in this repository (no Lightroom or
-xDesign integration) — see [Scope and limitations](#scope-and-limitations).
+This package implements Gatoway's generic, position-based action model
+(`ARCHITECTURE.md` AD-8): two generic actions, **Key** (keypad positions) and **Dial**
+(encoder/dial positions), whose displayed content and behavior are fully controlled by
+Gatoway core. Neither action has any app-specific or even idle-specific knowledge baked
+into it — the plugin only forwards raw physical events (`input_event`) and renders
+whatever Gatoway core instructs (`render_update`), including the built-in idle
+appearance shown when no application currently has focus. As of
+`extension-provided-slot-content`, it additionally reports the connected device's live
+button/dial slot capacity to Gatoway core (`device_capacity`) — see
+[How it reports live slot capacity](#how-it-reports-live-slot-capacity) below. There is
+still no application-specific plugin work in this repository (no Lightroom or xDesign
+integration) — see [Scope and limitations](#scope-and-limitations).
 
 For the project's requirements and architecture, see [`../REQUIREMENTS.md`](../REQUIREMENTS.md)
 and [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For the full wire message contract
-(`register`, `focus`, `input_event`, `render_update`, `command`, `capability_update`),
-see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — this is the reference an application
-plugin author should build against. What a connected application plugin's capabilities
-actually render as on a given key/dial is controlled by Gatoway core's local layout
-config file, not anything in this package — see
-[`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md). For the detailed capability
-specs this package implements, see
+(`register`, `focus`, `input_event`, `render_update`, `command`, `device_capacity`,
+`slot_capacity`), see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) — this is the
+reference an application plugin author should build against. What a connected
+application plugin's content actually renders as on a given key/dial is resolved by
+Gatoway core directly against this plugin's own `device_capacity` report — there is no
+separate, host-side layout config file anymore. For the detailed capability specs this
+package implements, see
 [`openspec/specs/stream-deck-core-client/`](../openspec/specs/stream-deck-core-client/),
 [`openspec/specs/stream-deck-core-lifecycle/`](../openspec/specs/stream-deck-core-lifecycle/),
 and [`openspec/specs/stream-deck-idle-display/`](../openspec/specs/stream-deck-idle-display/)
-(despite its name, `stream-deck-idle-display` is now where the generic action model —
-plus, as of `persisted-layout-config`'s QA-014 fix, the local default-baseline
-guarantee — is specified; the original static-Idle requirements it once held were
-removed in favor of the generic Key/Dial requirements). `persisted-layout-config`'s own
-delta to that spec is not yet consolidated at the time of writing; see
-[`openspec/changes/persisted-layout-config/specs/stream-deck-idle-display/spec.md`](../openspec/changes/persisted-layout-config/specs/stream-deck-idle-display/spec.md).
+(despite its name, `stream-deck-idle-display` is where the generic action model — plus
+the local default-baseline guarantee — is specified).
 
 ## Requirements
 
@@ -147,8 +142,8 @@ new **Key** action onto that position instead.
 
 No real Lightroom or xDesign plugin exists yet — both are future work (`ARCHITECTURE.md`
 delivery-sequence steps 3 and 5). To exercise focus tracking, profile routing, and live
-capability updates end to end against real hardware in the meantime, `gatoway-core`
-ships a manual test-double application-plugin client:
+content updates end to end against real hardware in the meantime, `gatoway-core` ships a
+manual test-double application-plugin client:
 [`gatoway-core/test/manual/testAppClient.ts`](../gatoway-core/test/manual/testAppClient.ts).
 
 With Gatoway core already running (e.g. via this plugin, or standalone with
@@ -159,34 +154,37 @@ npm run manual:test-app-client --workspace=gatoway-core
 ```
 
 This connects to Gatoway core, registers as `pluginType: "test-app"` declaring a small
-fixture set of capabilities (two buttons, one dial), and then accepts commands typed at
-the prompt. **As of `persisted-layout-config`, these fixture capabilities only bind to a
-physical key/dial if Gatoway core's layout config file actually binds them** — the
-script's own header comment documents the exact config snippet to hand-author for its
-fixture ids; see [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md) for the schema.
-Without a matching config, the script still connects and registers fine, but `focus`/
-`update` below simply have nothing bound to actually render on hardware (a safe no-op,
-not an error):
+fixture `content` (two buttons, one dial — addressed only by ordinal position), and then
+accepts commands typed at the prompt. **No layout config file is needed anymore** —
+Gatoway core resolves this fixture content directly against whatever physical
+button/dial slots this plugin currently reports via `device_capacity`. Place at least
+two generic Key actions and one generic Dial action on the connected device (see
+[Placing the generic actions](#placing-the-generic-actions-manual-one-time) above) to
+see the full fixture; any extra declared entries beyond what's currently placed simply
+aren't rendered anywhere (safe underflow, matching `REQUIREMENTS.md` FR-007):
 
-- **`focus`** — reports `focused: true`. Should bind the test fixture's two keys and one
-  dial on the real hardware, replacing the idle appearance.
+- **`focus`** — reports `focused: true`. Should render the test fixture's two buttons
+  and one dial on whatever physical slots are currently placed, replacing the idle
+  appearance.
 - **`blur`** — reports `focused: false`. Should revert the hardware to the idle
   appearance, with the icon explicitly reset rather than left showing whatever the test
   app last displayed.
-- **`update`** — pushes a `capability_update` toggling one button's label between
+- **`update`** — re-sends `register` with the first button's label toggled between
   `"Fixture A"` and `"Fixture A (pushed)"`. If this client is currently focused, the
   real hardware should update immediately, with no further focus change or key press
-  needed — this is the live capability-update mechanism's headline behavior.
+  needed — re-sending `register` is the only content-update mechanism now; there is no
+  separate `capability_update` message anymore.
 - **`quit`** — disconnects. Since a disconnect while focused clears focus exactly like
   an explicit blur, this should also revert the hardware to the idle appearance.
 
-Any `command` message Gatoway core sends back (a bound key press or dial turn on the
-real hardware while this test-double is focused) is printed to the console as it
-arrives. This script is genuinely useful beyond this change's own verification —
-anyone developing or testing Gatoway further, including whoever eventually adapts the
-real Lightroom plugin, can use it to exercise the full mechanism without needing a real
-application plugin connected. See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the
-full message contract this script (and any real plugin) speaks.
+Any `command` message Gatoway core sends back (a rendered button/dial press or turn on
+the real hardware while this test-double is focused) is printed to the console as it
+arrives, identified by its ordinal `slotIndex` rather than any id. This script is
+genuinely useful beyond any single change's own verification — anyone developing or
+testing Gatoway further, including whoever eventually adapts the real Lightroom plugin,
+can use it to exercise the full mechanism without needing a real application plugin
+connected. See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full message
+contract this script (and any real plugin) speaks.
 
 ## How it spawns Gatoway core
 
@@ -202,12 +200,40 @@ The plugin then connects to the spawned Gatoway core instance as a TCP client, u
 same `register`/`register_ack` handshake and shared-secret token any other native
 plugin uses (see [`gatoway-core/README.md`](../gatoway-core/README.md)'s "Message
 protocol" and "Auth token file" sections), registering with plugin type `stream-deck`
-and an empty capability manifest. This is deliberate and unrelated to the generic action
-model added by `focus-profile-routing`: per `ARCHITECTURE.md` AD-8, the Stream Deck
-plugin's own connection never declares capabilities — it is the one display client
-Gatoway core sends `render_update` to, not an application connection with its own
-capabilities to bind positions to. It forwards physical `input_event`s and applies
-`render_update`s exactly as described in [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md).
+and no declared `content`. This is deliberate and unrelated to the generic action model:
+per `ARCHITECTURE.md` AD-8, the Stream Deck plugin's own connection never declares
+content — it is the one display client Gatoway core sends `render_update` to, not an
+application connection with its own content to fill physical slots. It forwards
+physical `input_event`s and applies `render_update`s exactly as described in
+[`../docs/PROTOCOL.md`](../docs/PROTOCOL.md).
+
+## How it reports live slot capacity
+
+Once connected and registered, the plugin also reports the connected device's live
+button/dial slot capacity to Gatoway core via `device_capacity`
+(`extension-provided-slot-content`, `ARCHITECTURE.md` AD-9) —
+[`src/coreClient/deviceCapacity.ts`](src/coreClient/deviceCapacity.ts) derives the
+ordered list of physical positions currently holding this plugin's own generic Key
+action, and the ordered list holding its generic Dial action, from the Elgato SDK's live
+`Device.size`/`Device.actions` info:
+
+- Sent once immediately after this connection's own registration, and again any time the
+  derived lists actually change — a generic action placed/removed (`onWillAppear`/
+  `onWillDisappear`), or a device connected/disconnected.
+- **Order is stabilized independently of the Elgato SDK's own `actions` iterator**
+  (not documented as stable): keys are sorted in reading order (row ascending, then
+  column ascending within a row); dials are sorted by ascending index. This keeps
+  ordinal index N consistently meaning the same physical position across repeated
+  reports, until capacity actually changes.
+- Only this plugin's own generic Key/Dial actions are counted — any other action (a
+  folder, a third-party plugin's action, etc.) placed on the same device is not a
+  "generic" slot Gatoway core can address, and is excluded.
+
+This is what lets Gatoway core resolve an application plugin's ordinally-addressed
+`content` directly against physical positions, with no separate host-side layout config
+file — see
+[Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+in the protocol reference for the full mechanism.
 
 ## Configuration
 
@@ -273,12 +299,11 @@ logs exactly why (`allowed_origins_config_missing` if no file exists at the path
 `allowed_origins_config_read_failed` if the file exists but can't be read, e.g. a
 permissions error; `allowed_origins_config_invalid_json` if it isn't valid JSON;
 `allowed_origins_config_invalid_shape` if it's valid JSON but doesn't match the schema
-above; or `allowed_origins_config_loaded` on success), mirroring `layout.json`'s own
-`layoutStore.ts` log pattern (`docs/LAYOUT_CONFIG.md`) for local config files in this
-project.
+above; or `allowed_origins_config_loaded` on success), following the same fail-safe,
+never-crash-startup pattern this project uses for every local config file.
 
-This file is unrelated to `layout.json` (position-to-capability bindings) — a separate
-file for a separate concern, connection authentication rather than what renders where.
+This file is unrelated to slot capacity/content resolution — a separate file for a
+separate concern, connection authentication rather than what renders where.
 
 ## Development workflow
 
@@ -313,32 +338,34 @@ that was confirmed live against real Stream Deck+ hardware during `/verify` (see
 
 ## Scope and limitations
 
-This package implements the plugin skeleton (`stream-deck-plugin-skeleton`) plus the
-generic action model, focus/profile routing on the Gatoway core side, and live
-capability updates (`focus-profile-routing`) — the fourth change in Gatoway's delivery
-sequence (see `../ARCHITECTURE.md`'s Delivery Sequence). As of this change:
+This package implements the plugin skeleton (`stream-deck-plugin-skeleton`), the generic
+action model plus focus/profile routing on the Gatoway core side
+(`focus-profile-routing`), and extension-provided slot content plus live slot-capacity
+reporting (`extension-provided-slot-content`, delivery-sequence step 7 — see
+`../ARCHITECTURE.md`'s Delivery Sequence). As of the most recent change:
 
-- **Command forwarding, profile routing, and focus tracking all work end to end** —
-  Gatoway core resolves a physical key press or dial turn against whichever connection
-  currently has focus and forwards a `command`, and switches the Stream Deck's display
-  between an application's bound layout and the built-in idle appearance as focus
-  changes. All of this has been verified live against real Stream Deck+ hardware using
-  a test-double application client (see
+- **Command forwarding, profile routing, and focus tracking all work end to end, purely
+  by ordinal position** — Gatoway core resolves a physical key press or dial turn
+  (translated to an ordinal index via this plugin's own live `device_capacity` report)
+  against whichever connection currently has focus and forwards a `command`, and
+  switches the Stream Deck's display between an application's declared content and the
+  built-in idle appearance as focus changes. All of this has been verified live against
+  real Stream Deck+ hardware using a test-double application client (see
   [Exercising the mechanism without a real application plugin](#exercising-the-mechanism-without-a-real-application-plugin)
   above), since no real Lightroom/xDesign plugin exists yet.
-- **Position → capability bindings are now real, file-backed config** (`persisted-layout-config`,
-  delivery-sequence step 6): Gatoway core loads a local JSON layout config file at
-  startup instead of an in-code test fixture. This package's own generic Key/Dial
-  actions are unaffected by that change — they still just render whatever `render_update`
-  they're told to — but a capability now only appears anywhere on the device if that
-  config file actually binds it to a position; see
-  [`../docs/LAYOUT_CONFIG.md`](../docs/LAYOUT_CONFIG.md).
+- **This plugin now reports live slot capacity to Gatoway core** (`device_capacity`,
+  `ARCHITECTURE.md` AD-9) — see
+  [How it reports live slot capacity](#how-it-reports-live-slot-capacity) above. There is
+  no separate, host-side layout config file anymore: Gatoway core resolves an
+  application plugin's declared content directly against whatever this plugin currently
+  reports.
 - **A full plugin process restart applies a local default baseline immediately**
-  (`persisted-layout-config`'s QA-014 fix): if no remembered render state exists yet for
-  a position — e.g. right after a full plugin restart, before Gatoway core's own sweep
-  arrives — the generic Key/Dial actions now apply their manifest-declared default
-  label/icon locally, rather than showing an uninitialized-looking state indefinitely.
-  A subsequent real `render_update` still overrides this exactly as before.
+  (QA-014's fix, unaffected by the slot-capacity change): if no remembered render state
+  exists yet for a position — e.g. right after a full plugin restart, before Gatoway
+  core's own sweep arrives — the generic Key/Dial actions apply their manifest-declared
+  default label/icon locally, rather than showing an uninitialized-looking state
+  indefinitely. A subsequent real `render_update` still overrides this exactly as
+  before.
 - **No auto-install of the generic actions.** See
   [Placing the generic actions](#placing-the-generic-actions-manual-one-time) above.
 - **No Property Inspector or settings UI** for the plugin.
@@ -367,10 +394,10 @@ time of writing:
   original static Idle action, before this change), found not to work against real
   hardware, and reverted — deferred to a future change (see
   `stream-deck-plugin-skeleton`'s `design.md` Open Questions).
-- A capability label longer than roughly 8-10 characters visibly overflows a physical
+- A `SlotContent` label longer than roughly 8-10 characters visibly overflows a physical
   key's title area (e.g. the manual test-app client's `"Fixture A (pushed)"` label) —
   see [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md#icon-and-label-content) for practical
-  length guidance.
+  length and pixel-dimension guidance.
 
 See `../QA_REPORT.md` for full detail and status on these and all other findings from
 this change's review and verification.

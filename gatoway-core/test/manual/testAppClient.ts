@@ -1,74 +1,69 @@
 #!/usr/bin/env tsx
 /**
- * Manual test-double application-plugin client (tasks.md 6.3/6.5, extended by
- * task-group-7's addendum for `capability_update`).
+ * Manual test-double application-plugin client (extension-provided-slot-content
+ * tasks.md 8.6).
  *
- * No real second application plugin exists yet (Lightroom/xDesign are future changes -
- * proposal.md's "Out of scope"), so this script stands in for one: it connects to a
- * running Gatoway core, registers as pluginType "test-app" (declaring capabilities under
- * the fixture ids below - design.md D3, amended: a live capability is only rendered if
- * the connection itself has actually declared it), and lets a human toggle its focus
- * state or push a live capability update from stdin so the focus-tracking/profile-
- * routing/capability-update mechanism can be exercised end to end against real Stream
- * Deck+ hardware running the actual Stream Deck plugin (the real display client) - task
- * 6.5's manual/live-hardware verification.
+ * No real second application plugin exists yet (Lightroom/xDesign are future changes),
+ * so this script stands in for one: it connects to a running Gatoway core, registers as
+ * pluginType "test-app" declaring a small fixture `content` (two buttons, one dial -
+ * design.md D3: addressed only by ordinal position, never by an id), and lets a human
+ * toggle its focus state or push a live content update from stdin so the focus-
+ * tracking/profile-routing/live-content-update mechanism can be exercised end to end
+ * against real Stream Deck+ hardware running the actual Stream Deck plugin (the real
+ * display client).
  *
- * persisted-layout-config (tasks.md 4.4): since `testFixtureLayoutResolver.ts` was
- * replaced by a real, file-backed layout, actually seeing a bound key/dial on real
- * hardware now additionally requires a hand-authored layout config file (at the path
- * `loadConfig().layoutFilePath` resolves to, or wherever `GATOWAY_LAYOUT_FILE` points)
- * binding a "test-app" profile's positions to the capability ids below, e.g.:
- * ```json
- * {
- *   "profiles": {
- *     "test-app": {
- *       "bindings": [
- *         { "controller": "keypad", "position": { "row": 0, "column": 0 }, "capabilityId": "test-fixture.button.one" },
- *         { "controller": "keypad", "position": { "row": 0, "column": 1 }, "capabilityId": "test-fixture.button.two" },
- *         { "controller": "encoder", "position": { "index": 0 }, "capabilityId": "test-fixture.dial.one" }
- *       ]
- *     }
- *   }
- * }
- * ```
- * Without such a file (or with the wrong plugin type/positions/ids), Gatoway core still
- * starts and this client still connects and registers fine - `focus`/`update` below
- * simply have nothing bound to actually render (safe no-op, matching an unbound
- * position generally).
+ * Unlike the old `capabilities` + hand-authored `layout.json` model, **no separate
+ * layout config file is needed anymore.** Gatoway core resolves this client's declared
+ * content directly against whatever physical button/dial slots the Stream Deck plugin
+ * reports (`device_capacity`) - ordinal position 0 of `content.buttons` renders at
+ * physical button-slot 0, and so on. If the connected Stream Deck device currently has
+ * fewer generic Key/Dial actions placed than this fixture declares, the extra entries
+ * simply aren't rendered anywhere (safe underflow/overflow, matching FR-007) - place at
+ * least two generic Key actions and one generic Dial action on the device to see the
+ * full fixture.
  *
  * Usage (with Gatoway core already running, e.g. via the Stream Deck plugin or
  * `npm run dev --workspace=gatoway-core`):
  *   npm run manual:test-app-client --workspace=gatoway-core
  *
  * Once connected and registered, type at the prompt:
- *   focus    - report focused: true (should bind the layout config's two keys and one
- *              dial on the real hardware, per whatever's configured for "test-app")
+ *   focus    - report focused: true (should render this fixture's two buttons and one
+ *              dial on whatever physical slots the Stream Deck plugin currently reports)
  *   blur     - report focused: false (should revert the hardware to the idle appearance,
  *              explicitly resetting icon rather than leaving a previous one stuck)
- *   update   - push a capability_update for "test-fixture.button.one" (should
+ *   update   - re-sends `register` with the first button's label toggled (should
  *              immediately update the real hardware if this client is currently
- *              focused, without needing another focus change or key press)
+ *              focused, without needing another focus change or key press - re-sending
+ *              `register` is the only content-update mechanism now; there is no
+ *              separate `capability_update` message anymore)
  *   quit     - disconnect (should also revert the hardware to idle, since a disconnect
  *              while focused clears focus just like an explicit blur)
  *
- * Any `command` message Gatoway core sends back (i.e. a bound key/dial on the real
+ * Any `command` message Gatoway core sends back (i.e. a rendered button/dial on the real
  * hardware was pressed/rotated while this test-double is focused) is printed as it
- * arrives.
+ * arrives, identified by its ordinal `slotIndex` rather than any id. Any `slot_capacity`
+ * message (sent right after registration, and again on every focus gain) is also
+ * printed, showing how many button/dial slots this client currently has to fill.
  */
 import { createInterface } from "node:readline/promises";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { loadConfig } from "../../src/config.js";
 import { encodeMessage } from "../../src/protocol/envelope.js";
-import type { Capability } from "../../src/protocol/messages.js";
+import type { RegisterContent } from "../../src/protocol/messages.js";
 import { encodeNdjsonLine, NdjsonDecoder } from "../../src/protocol/tcpFraming.js";
 
-/** Registered under pluginType "test-app" below; a layout config must bind these ids. */
-const FIXTURE_CAPABILITIES: Capability[] = [
-  { id: "test-fixture.button.one", label: "Fixture A", type: "button" },
-  { id: "test-fixture.button.two", label: "Fixture B", type: "button" },
-  { id: "test-fixture.dial.one", label: "Fixture Dial", type: "dial" },
-];
+const PLUGIN_TYPE = "test-app";
+
+function buildFixtureContent(labelSuffix: string): RegisterContent {
+  return {
+    buttons: [
+      { label: `Fixture A${labelSuffix}` },
+      { label: "Fixture B" },
+    ],
+    dials: [{ label: "Fixture Dial" }],
+  };
+}
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -91,13 +86,13 @@ async function main(): Promise<void> {
     encodeNdjsonLine(
       encodeMessage({
         type: "register",
-        payload: { pluginType: "test-app", capabilities: FIXTURE_CAPABILITIES, token },
+        payload: { pluginType: PLUGIN_TYPE, content: buildFixtureContent(""), token },
       }),
     ),
   );
 
   console.log(
-    "[test-app] registered as pluginType 'test-app'. Commands: focus | blur | update | quit",
+    `[test-app] registered as pluginType '${PLUGIN_TYPE}'. Commands: focus | blur | update | quit`,
   );
 
   let updateToggle = false;
@@ -117,16 +112,17 @@ async function main(): Promise<void> {
     }
     if (line === "update") {
       // Alternates between two labels each time, so a repeated "update" visibly toggles
-      // the real hardware's key label if this test-double is currently focused
-      // (design.md D7, task-group-7 addendum).
+      // the real hardware's first button's label if this test-double is currently
+      // focused. Re-sends the connection's *entire* content array - the only mechanism
+      // for any content change now (design.md D3) - rather than a single-field update.
       updateToggle = !updateToggle;
       socket.write(
         encodeNdjsonLine(
           encodeMessage({
-            type: "capability_update",
+            type: "register",
             payload: {
-              capabilityId: "test-fixture.button.one",
-              label: updateToggle ? "Fixture A (pushed)" : "Fixture A",
+              pluginType: PLUGIN_TYPE,
+              content: buildFixtureContent(updateToggle ? " (pushed)" : ""),
             },
           }),
         ),

@@ -1,21 +1,21 @@
 # Gatoway Message Protocol Reference
 
-Covers the full message contract implemented as of the `focus-profile-routing` change,
-including its task-group-7 addendum (`capability_update` and the `render_update`/
-`capability_update` icon reset semantics), and the `validate-capability-payloads` change
-(capability-shape validation at `register` and `capability_update`, and the follow-up
-`error` feedback it produces). If you are writing a new application plugin
-(following Lightroom or xDesign), this document should be the only thing you need to
-read to speak Gatoway's wire protocol — you should not need to read Gatoway core's
-source. Kept in sync with `gatoway-core/src/protocol/messages.ts`, the single source of
-truth for these shapes; if the two ever disagree, the source wins and this document is
-stale.
+Covers the full message contract as of `extension-provided-slot-content`, which replaced
+the earlier `Capability`/`capability_update`/`capabilityId` model with ordinal,
+position-agnostic `content` plus live slot-capacity reporting (`device_capacity`/
+`slot_capacity`). If you are writing a new application plugin (following Lightroom or
+xDesign), this document should be the only thing you need to read to speak Gatoway's
+wire protocol — you should not need to read Gatoway core's source. Kept in sync with
+`gatoway-core/src/protocol/messages.ts`, the single source of truth for these shapes; if
+the two ever disagree, the source wins and this document is stale.
 
-Speaking the wire protocol correctly is necessary but not sufficient to see anything
-render: a capability also needs a physical position bound to it in the local layout
-config file, which is a separate, host-side concern from anything on this wire — see
-[`LAYOUT_CONFIG.md`](LAYOUT_CONFIG.md) for that file's schema, location, and a worked
-example.
+Speaking the wire protocol correctly is now also *sufficient* to see something render —
+unlike the old model, there is no separate, host-side layout/config file to hand-author
+in addition to this wire contract. Gatoway core tells each application plugin how many
+button/dial slots are currently available (`slot_capacity`, derived from the Stream Deck
+plugin's own live `device_capacity` report) and renders whatever ordered content that
+plugin declares directly against those slots, addressed purely by ordinal position — see
+[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) below.
 
 ## Transport and framing
 
@@ -73,16 +73,19 @@ Every message, on both transports, is a single JSON object with this shape:
 ### `register` (plugin → core)
 
 Sent once, immediately after connecting, to authenticate and declare the plugin's
-capability manifest.
+displayed content.
 
 ```jsonc
 {
   "type": "register",
   "payload": {
     "pluginType": "lightroom",       // string, required: identifies the kind of plugin
-    "capabilities": [                // Capability[], required (may be empty)
-      { "id": "next-photo", "label": "Next Photo", "type": "button" }
-    ],
+    "content": {                     // RegisterContent, optional (each array defaults to [])
+      "buttons": [
+        { "label": "Next Photo" }
+      ],
+      "dials": []
+    },
     "token": "…"                     // string, required for TCP; omitted for WebSocket
   }
 }
@@ -115,49 +118,62 @@ capability manifest.
     for the local config file that plugin reads instead, and forwards into its spawned
     Gatoway core child's environment.
 - Sending `register` again on an already-authenticated connection re-declares its
-  capability manifest without repeating the credential check. Omitting `capabilities`
-  on a re-registration leaves the previously-declared manifest unchanged; an explicit
-  array (including `[]`) always replaces it. This is distinct from **reconnecting** —
-  a brand-new connection opened after a prior one disconnected. A new connection always
-  starts from nothing (no capabilities, no `pluginType`) regardless of what any
-  previous, now-disconnected connection had declared, so it must send a full `register`
-  of its own — see [Reconnection](#reconnection) below.
+  content without repeating the credential check. Omitting `content` on a
+  re-registration leaves the previously-declared content unchanged; an explicit
+  `content` (including empty arrays) always replaces it. **This is the only mechanism
+  for any content change** — a live label/state update, paging to a different subset,
+  or entering/leaving a nested group — there is no separate, lighter-weight update
+  message; a plugin always re-sends its complete, current `content`. This is distinct
+  from **reconnecting** — a brand-new connection opened after a prior one disconnected.
+  A new connection always starts from nothing (no content, no `pluginType`) regardless
+  of what any previous, now-disconnected connection had declared, so it must send a full
+  `register` of its own — see [Reconnection](#reconnection) below.
 - `pluginType` is a free-form string identifying the *kind* of plugin (e.g.
   `"lightroom"`, `"xdesign"`, `"stream-deck"` — the last one reserved for the Stream
   Deck plugin itself, which is the only connection Gatoway core ever sends
-  `render_update` to). It is never used as, or derived from, the connection's unique
-  ID — multiple simultaneous connections may share the same `pluginType`.
-- **Each `capabilities` entry is validated against the `Capability` shape below.** An
-  entry that fails validation (e.g. a missing `id`, or an unrecognized `type`) is
-  *dropped* from the connection's declared manifest — it does **not** fail the whole
-  registration. The connection still authenticates and registers successfully with
-  whatever valid capabilities remain (even if that's none of them), and Gatoway core
-  sends a follow-up [`error`](#error-either-direction) message afterward (after
-  `register_ack`) identifying which entries were rejected and why. See
-  [Capability validation errors](#capability-validation-errors) below for the exact
-  shape.
+  `render_update` to, and which declares no `content` of its own). It is never used as,
+  or derived from, the connection's unique ID — multiple simultaneous connections may
+  share the same `pluginType`.
+- **Each `content.buttons`/`content.dials` entry is validated against the
+  `SlotContent` shape below.** An entry that fails validation (e.g. a missing `label`,
+  or a `state` field on a dial entry) is *dropped* from its own array — it does **not**
+  fail the whole registration. The connection still authenticates and registers
+  successfully with whatever valid entries remain (even if that's none of them), and
+  Gatoway core sends a follow-up [`error`](#error-either-direction) message afterward
+  (after `register_ack`) identifying which entries were rejected and why. See
+  [Content validation errors](#content-validation-errors) below for the exact shape.
 
-#### `Capability`
+#### `RegisterContent` / `SlotContent`
 
 ```ts
-interface Capability {
-  id: string;               // non-empty; stable identifier, referenced later in `command` messages
-  label: string;             // non-empty; human-readable name
-  type: "button" | "dial";
-  description?: string;      // string if present
-  icon?: string;              // string if present — register-time `icon` does not accept `null`
-  state?: number;             // number if present — toggle/indicator state, e.g. on/off
+interface RegisterContent {
+  buttons: SlotContent[];   // defaults to [] if omitted
+  dials: SlotContent[];     // defaults to [] if omitted
+}
+
+interface SlotContent {
+  icon?: string;    // string if present — register-time `icon` does not accept `null`
+  label: string;    // non-empty; human-readable name
+  state?: number;   // buttons only — a dial (content.dials) entry with `state` is rejected
 }
 ```
 
+**No `id` field, and no `type` field on each entry.** Nothing addresses a `SlotContent`
+entry by identity — only by its ordinal position within its own array
+(`content.buttons[0]`, `content.buttons[1]`, …). Which array an entry lives in *is* its
+type, so there is no separate `type` field either — the old `Capability.id`/`.type`
+fields (and `.description`, which carried no rendering behavior) are gone entirely.
+Gatoway core never stores or looks up anything by a plugin-chosen string; see
+[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) below for how
+this ordinal addressing actually resolves to a physical position.
+
 `icon` here is a plain optional string, not the `string | null | undefined` three-way
-distinction `render_update`/`capability_update` use on the wire (see below) — on this
-stored, in-memory record, `undefined` covers both "never declared an icon" and
-"explicitly reset via a later `capability_update`"; both are the same fact ("this
-capability currently has no icon") from a plugin author's point of view. See
-[Icon and label content](#icon-and-label-content) for format and length guidance that
-applies to `icon`/`label` everywhere they appear in the protocol — at registration, in
-`render_update`, and in `capability_update`.
+distinction `render_update` uses on the wire (see below) — declaring fresh `content`
+(the only content-update mechanism now) is always a full replacement, never a sparse
+patch, so there is no separate "explicitly reset to nothing" value needed at this level.
+See [Icon and label content](#icon-and-label-content) for format, pixel-dimension, and
+length guidance that applies to `icon`/`label` everywhere they appear in the protocol —
+at registration and in `render_update`.
 
 ### `register_ack` (core → plugin)
 
@@ -184,9 +200,9 @@ authenticated connection that sends a malformed message (e.g. invalid JSON, or a
 payload that isn't a JSON object); a connection that hasn't authenticated yet is
 simply disconnected instead, with no `error` sent first. It is also reused, unchanged in
 shape, to report semantically-invalid-but-well-formed payload contents — specifically,
-rejected `register` capability entries and rejected `capability_update` fields (see
-[Capability validation errors](#capability-validation-errors) below) — rather than
-inventing a second message type for that purpose.
+rejected `register` content entries (see
+[Content validation errors](#content-validation-errors) below) — rather than inventing
+a second message type for that purpose.
 
 ```jsonc
 {
@@ -198,65 +214,43 @@ inventing a second message type for that purpose.
 
 **Application plugins should handle unsolicited `error` messages on their own
 connection**, not just responses to something they just sent. A `register`'s rejected
-capabilities and a `capability_update`'s rejected fields are both reported this way, as a
-follow-up message rather than inline in `register_ack`/an acknowledgement — a plugin that
-only reads the message type it expects next (e.g. only ever looking for `register_ack`
-immediately after sending `register`) will silently miss this feedback entirely, exactly
-as it would have silently missed the underlying data problem before this validation
-existed. Read every message that arrives on your connection, not just the one you're
-currently waiting on.
+content entries are reported this way, as a follow-up message rather than inline in
+`register_ack` — a plugin that only reads the message type it expects next (e.g. only
+ever looking for `register_ack` immediately after sending `register`) will silently miss
+this feedback entirely, exactly as it would have silently missed the underlying data
+problem before this validation existed. Read every message that arrives on your
+connection, not just the one you're currently waiting on.
 
-#### Capability validation errors
+#### Content validation errors
 
-Two situations produce a follow-up `error` message with structured `details`, always
-sent *after* whatever `register_ack` or stored update already went through — the
-connection itself was never at fault, so authentication/storage proceeds normally; only
-the specific rejected entry/field is reported separately:
+A `register` with one or more malformed `content.buttons`/`content.dials` entries
+produces a follow-up `error` message with structured `details`, always sent *after*
+`register_ack` — the connection itself was never at fault, so authentication/storage
+proceeds normally; only the specific rejected entry is reported separately (see
+[`RegisterContent`/`SlotContent`](#registercontent--slotcontent) above for the shape
+being validated against):
 
-- **A `register` with one or more malformed `capabilities` entries** (see
-  [`Capability`](#capability) above for the shape being validated against):
-
-  ```jsonc
-  {
-    "type": "error",
-    "connectionId": "abc-123",
-    "payload": {
-      "message": "one or more declared capabilities were invalid and have been dropped from the connection's manifest",
-      "details": {
-        "rejectedCapabilities": [
-          { "index": 2, "reason": "\"id\" must be a non-empty string" }
-        ]
-      }
+```jsonc
+{
+  "type": "error",
+  "connectionId": "abc-123",
+  "payload": {
+    "message": "one or more declared content entries were invalid and have been dropped from the connection's content",
+    "details": {
+      "rejectedContent": [
+        { "controller": "keypad", "index": 2, "reason": "\"label\" must be a non-empty string" }
+      ]
     }
   }
-  ```
+}
+```
 
-  `index` is the entry's position in the `capabilities` array as sent (0-based).
-  Registration still succeeds with every *other*, validly-shaped capability — even if
-  every entry was rejected, the connection registers with an empty manifest rather than
-  failing outright.
-
-- **A `capability_update` with one or more invalid `icon`/`label`/`state` fields:**
-
-  ```jsonc
-  {
-    "type": "error",
-    "connectionId": "abc-123",
-    "payload": {
-      "message": "one or more capability_update fields were invalid and were not applied",
-      "details": {
-        "rejectedFields": [
-          { "field": "state", "reason": "\"state\" must be a number" }
-        ]
-      }
-    }
-  }
-  ```
-
-  A rejected field is simply not applied — the stored capability's existing value for
-  that field is left unchanged, exactly as if the field had been omitted — while any
-  other, validly-typed field present in the same update still applies. No `error` is
-  sent when every field in the update passes validation.
+`controller` (`"keypad"` for a `content.buttons` entry, `"encoder"` for a
+`content.dials` entry) plus `index` — the entry's position within that array as sent
+(0-based) — together identify the rejected entry; there is no `id` to report by, since
+none exists at this shape. Registration still succeeds with every *other*, validly-shaped
+entry in both arrays — even if every entry was rejected, the connection registers with
+empty content rather than failing outright.
 
 ## Focus tracking
 
@@ -293,7 +287,7 @@ active/focused is **not** automatically treated as focused again on its new conn
 
 A dropped connection and the fresh connection that replaces it are unrelated as far as
 the wire protocol is concerned. Gatoway core assigns every accepted connection its own
-new connection ID and keeps no state — registered capabilities, `pluginType`, focus —
+new connection ID and keeps no state — declared content, `pluginType`, focus —
 beyond that connection's own lifetime; once a connection disconnects, its record is
 discarded outright (see [Authentication and registration](#authentication-and-registration)
 and [Focus tracking](#focus-tracking) above). There is no session/resume mechanism,
@@ -302,7 +296,7 @@ core has no notion of that at all, only of connections coming and going. Concret
 this means a plugin author reconnecting (e.g. after a dropped socket, a crash, or a
 browser Manifest V3 background service worker being torn down and restarted) must:
 
-- **Send a fresh `register`.** The new connection has no capability manifest until it
+- **Send a fresh `register`.** The new connection has no declared content until it
   does — nothing from the prior, now-disconnected connection carries over, even if that
   connection was registered moments earlier. Until `register` is sent, the connection is
   also unauthenticated and cannot send any other message type (it is simply disconnected
@@ -322,13 +316,112 @@ drop and reconnect often — a Manifest V3 browser extension's background servic
 being the prime example — since it means reconnect handling is just "repeat the normal
 startup sequence," not separate logic to write and maintain.
 
+## Slot capacity and ordinal content
+
+Gatoway core has no semantic understanding of what any application plugin's buttons or
+dials do — only what to display at a given physical slot, and which slot was just
+interacted with. Two message types make this possible: the Stream Deck plugin reports
+the device's live slot capacity as ordered *position lists* (`device_capacity`); Gatoway
+core forwards each application plugin just the *counts* (`slot_capacity`), and resolves
+that plugin's ordinally-addressed `content` (see [`register`](#register-plugin--core)
+above) against physical positions on its behalf.
+
+### `device_capacity` (Stream Deck plugin → core)
+
+Sent only by the connection that registered as `pluginType: "stream-deck"` — rejected
+(logged, ignored) from any other connection. Reports the ordered list of physical
+positions currently holding a generic Key action, and the ordered list currently holding
+a generic Dial action.
+
+```jsonc
+{
+  "type": "device_capacity",
+  "payload": {
+    "buttonPositions": [{ "row": 0, "column": 0 }, { "row": 0, "column": 1 }],
+    "dialPositions": [{ "index": 0 }]
+  }
+}
+```
+
+```ts
+interface DeviceCapacityPayload {
+  buttonPositions: Position[];
+  dialPositions: Position[];
+}
+```
+
+- Sent once at the Stream Deck plugin connection's own registration, and again any time
+  the set of placed generic Key/Dial actions changes (an action added/removed, a device
+  connected/disconnected) — event-driven, not polled.
+- **Order matters and must be stable.** Ordinal index N in `buttonPositions`/
+  `dialPositions` is what an application plugin's `content.buttons[N]`/`content.dials[N]`
+  ultimately renders at. The Stream Deck plugin is responsible for establishing a
+  deterministic order itself (e.g. reading order for keys, ascending index for dials) —
+  see `stream-deck-plugin/src/coreClient/deviceCapacity.ts` for the actual rule it uses —
+  since the Elgato SDK's own `actions` iterator order is not documented as stable.
+- Gatoway core keeps only the **latest** report in memory. It is never persisted and
+  never merged with a prior report — a fresh report fully replaces the previous one.
+
+### `slot_capacity` (core → application plugin)
+
+Tells an application plugin how many button/dial slots it currently has to fill — bare
+counts only; an application plugin has no use for actual physical positions.
+
+```jsonc
+{ "type": "slot_capacity", "connectionId": "abc-123", "payload": { "buttonSlots": 2, "dialSlots": 1 } }
+```
+
+```ts
+interface SlotCapacityPayload {
+  buttonSlots: number;
+  dialSlots: number;
+}
+```
+
+- Sent once immediately after that connection's own successful `register_ack`, and again
+  every time Gatoway core records that connection as newly focused (never on blur).
+- Derived directly from the Stream Deck plugin's latest `device_capacity` report
+  (`buttonSlots = buttonPositions.length`, `dialSlots = dialPositions.length`). If no
+  `device_capacity` has ever been received yet (e.g. the Stream Deck plugin isn't
+  connected), both counts are `0` — an application plugin declaring content against a
+  capacity of zero simply has nothing rendered yet, which is safe, normal behavior.
+
+### How resolution actually works
+
+Gatoway core never needs to know both an ordinal index *and* a physical position for
+more than the instant it translates between them:
+
+- **Input → command:** an `input_event`'s reported physical position is looked up in the
+  latest `device_capacity` report for the matching controller type, to find its ordinal
+  index N. Gatoway core then checks whether the *focused* connection's own
+  `content.buttons`/`content.dials` has an entry at index N. If so, that connection
+  receives a `command` naming ordinal index N (see [`command`](#command-core--focused-application-connection)
+  below). If the position isn't in the latest `device_capacity` report at all, or the
+  focused connection's content is shorter than physical capacity (underflow — entirely
+  expected, e.g. a plugin with only one button declared on a device with two button
+  slots), the event is safely logged and dropped, exactly as an unresolvable event always
+  has been.
+- **Content → render_update:** the reverse direction, whenever a connection's content is
+  newly displayed (it gains focus, or re-registers while already focused). For each
+  ordinal index present in that connection's `content.buttons`/`content.dials`, Gatoway
+  core looks up the corresponding physical position from the latest `device_capacity`
+  report and sends a `render_update` for it. Any remaining physical position, up to full
+  device capacity, is swept to the idle appearance — this is what makes a plugin
+  declaring *fewer* entries than available slots (underflow) safe: the unused slots
+  simply show idle, not stale content from whatever was there before.
+
+An application plugin with more content than it has slots for (or logically grouped
+content) manages its own paging/grouping and simply re-`register`s the right-sized subset
+to currently show — Gatoway core never needs to know this is happening.
+
 ## Position-addressed input and rendering (Stream Deck ↔ core)
 
 These three message types implement Gatoway's generic, position-based action model:
 the Stream Deck plugin has no knowledge of *what* a given key or dial means to any
 application — it only reports raw physical interactions and displays whatever it is
 told to. Gatoway core alone resolves "this position, while this application is
-focused" to a specific capability.
+focused" to an ordinal index within that connection's own declared content (see
+[Slot capacity and ordinal content](#slot-capacity-and-ordinal-content) above).
 
 ### Position addressing
 
@@ -375,10 +468,12 @@ interface InputEventPayload {
   down/up pair, a dial press is reported once, on press, as `"push"`.
 
 Gatoway core resolves every `input_event` against **the currently-focused connection's**
-bound capability at the reported position (never the sender's — the sender is always
-the Stream Deck plugin). If nothing is focused, or the focused connection has no
-capability bound at that position, the event is silently logged and dropped — this is
-normal, expected behavior, not an error condition.
+own declared content at the reported position (never the sender's — the sender is
+always the Stream Deck plugin), via the ordinal-index resolution described in
+[How resolution actually works](#how-resolution-actually-works) above. If nothing is
+focused, the reported position isn't part of the current device capacity, or the
+focused connection's content has no entry at the resolved ordinal index, the event is
+silently logged and dropped — this is normal, expected behavior, not an error condition.
 
 ### `render_update` (core → Stream Deck plugin)
 
@@ -426,7 +521,7 @@ this icon" need two different representations:
   that position's action (equivalent to calling the Elgato Stream Deck SDK's own
   `setImage()` with no argument). Gatoway core's idle sweep always sends `icon: null`
   for exactly this reason: without a distinct "reset" value, there would be no way to
-  actually clear a previously-focused connection's capability icon once focus moves
+  actually clear a previously-focused connection's content icon once focus moves
   away from it — omitting `icon` would leave it visually stuck, and inventing a fake
   sentinel string would be worse.
 - **a string** — set the icon to this value. See
@@ -437,9 +532,11 @@ receives `render_update` messages.
 
 ### Icon and label content
 
-Practical guidance for any `icon`/`label` value sent in `register`'s `capabilities`,
-`render_update`, or `capability_update` — established during live verification of this
-change against real Stream Deck+ hardware:
+Practical guidance for any `icon`/`label` value sent in `register`'s `content` or
+`render_update` — established during live verification of this project against real
+Stream Deck+ hardware, plus the canonical pixel-dimension guidance from Elgato's own
+Stream Deck SDK schema (`@elgato/schemas`, the source `@elgato/streamdeck`'s manifest
+validation is built from):
 
 - **`icon` must be a self-contained image string — never a file path.** Gatoway core's
   Stream Deck plugin bundle cannot contain image assets for applications that don't
@@ -449,27 +546,35 @@ change against real Stream Deck+ hardware:
   `data:image/png;base64,iVBORw0KGgo...`) or an inline SVG string. A filesystem path
   would only resolve on the machine and account that produced it, and Gatoway core has
   no mechanism to resolve or transmit a path's file contents on an application's behalf.
+- **Size `icon` for a physical key at 72 × 72 px (1x) / 144 × 144 px (2x).** This is the
+  same pixel size Elgato's own Stream Deck SDK documents for a manifest action's default
+  key image (`@elgato/schemas`' `States[].Image` schema entry: "Provided in two sizes,
+  72 × 72 px and 144 × 144 px (@2x)") — Gatoway core doesn't resize or scale whatever
+  `icon` a plugin sends, so match this size (or supply an SVG, which scales cleanly at
+  any size) to avoid a blurry or cropped result. GIF, PNG, and SVG are all supported
+  formats per that same schema.
 - **Keep `label` short — roughly 8-10 characters at the Stream Deck's default font
   size.** The physical key's title area clips or overflows past that, rather than
-  wrapping or shrinking to fit. Confirmed live on real Stream Deck+ hardware during this
-  change's verification: a 7-character label (`"Gatoway"`, the built-in idle label)
-  displays fully, while a 19-character label (`"Fixture A (pushed)"`, sent by the manual
-  test-app client's `update` command) visibly overflows the key's title area. Prefer a
-  short label plus, if more context is needed, the `description` field declared at
-  registration (not currently rendered on the physical device, but available for a
-  future Property Inspector or tooltip use).
+  wrapping or shrinking to fit. Confirmed live on real Stream Deck+ hardware: a
+  7-character label (`"Gatoway"`, the built-in idle label) displays fully, while a
+  19-character label visibly overflows the key's title area. Prefer a short label; there
+  is no separate description/tooltip field to fall back on for extra context (the old
+  `Capability.description` field carried no rendering behavior and was removed as
+  unused — see `extension-provided-slot-content` design.md D3).
 
 ### `command` (core → focused application connection)
 
 Sent to the currently-focused application connection once an `input_event` has been
-successfully resolved against one of its declared capabilities.
+successfully resolved against an ordinal index within that connection's own declared
+content.
 
 ```jsonc
 {
   "type": "command",
   "connectionId": "<focused connection id>",
   "payload": {
-    "capabilityId": "next-photo",
+    "controller": "keypad",
+    "slotIndex": 0,
     "eventType": "keyDown"
     // "delta" is present only when the originating input_event was a "rotate"
   }
@@ -478,101 +583,78 @@ successfully resolved against one of its declared capabilities.
 
 ```ts
 interface CommandPayload {
-  capabilityId: string;   // matches a `Capability.id` this connection declared at registration
+  controller: Controller;
+  slotIndex: number;    // ordinal position within this connection's own content.buttons/content.dials
   eventType: InputEventType;
   delta?: number;         // carried through from the originating input_event, if present
 }
 ```
+
+`slotIndex` identifies the entry's position within the focused connection's own
+`content.buttons` (`controller: "keypad"`) or `content.dials` (`controller: "encoder"`)
+array, exactly as last declared via `register` — Gatoway core carries no other meaning
+for it, and there is no id to translate it back to; the application plugin itself
+already knows what it put at that index.
 
 **Gesture timing is the receiving plugin's responsibility, not Gatoway's.** Neither
 Gatoway core nor the Stream Deck plugin does any debouncing or timing analysis — a
 `keyDown`/`keyUp` pair is forwarded as two separate `command` messages exactly as
 reported, and `CommandPayload` doesn't even carry a timestamp. This is deliberate, per
 AD-8: the Stream Deck plugin has zero app-specific knowledge, and Gatoway core's job
-stops at resolving position → capability, never gesture semantics. So double-press
+stops at resolving position → ordinal index, never gesture semantics. So double-press
 detection, long-press detection, or distinguishing a quick tap from a held key is
 entirely up to the application plugin receiving the `command` messages — it must track
-its own event timestamps per `capabilityId` across successive messages it receives.
-Gatoway does not, and will not, provide this itself.
+its own event timestamps per `controller`/`slotIndex` pair across successive messages it
+receives. Gatoway does not, and will not, provide this itself.
 
-> **Implementation note:** this message type is not part of the original design
-> document's enumerated set of new message types for this change (`focus`,
-> `input_event`, `render_update`) — it was added as a minimal, necessary fill of a gap
-> discovered during implementation (the design's own `profile-routing` requirements
-> describe Gatoway core "forwarding a corresponding command" to the focused connection,
-> but never define that message's shape). It follows the same envelope and framing as
-> every other message type. See the `focus-profile-routing` change's developer report
-> for the full note; a future architecture pass may want to formally ratify this shape.
+> **Implementation note:** this message type is not part of any design document's
+> original enumerated set of new message types for the change that introduced it
+> (`focus-profile-routing`'s design.md originally listed only `focus`, `input_event`,
+> `render_update`) — it was added as a minimal, necessary fill of a gap discovered
+> during implementation. It follows the same envelope and framing as every other
+> message type.
 
-### `capability_update` (application plugin → core)
+## Live content updates: re-send `register`
 
-Lets a plugin push a live display change to one of its own already-declared
-capabilities, at any time after registration — not just at registration time. This is
-the mechanism that satisfies `REQUIREMENTS.md` FR-001's "an application can push a state
-update that changes a button's icon, label, or toggle state."
+There is no separate "update" message for a live display change (a photo counter
+ticking up, a toggle state flipping, paging to a different subset of content, entering
+or leaving a nested group). A plugin simply re-sends `register` with its complete,
+current `content` — the same mechanism used at initial registration (see
+[`register`](#register-plugin--core) above: "Sending `register` again … re-declares its
+content"). This was a deliberate protocol-simplicity trade-off: always resending the
+full `content` array costs more bytes than a lightweight single-slot update would for a
+small change, in exchange for a single, uniform update mechanism instead of two.
 
-```jsonc
-{
-  "type": "capability_update",
-  "payload": {
-    "capabilityId": "next-photo",
-    "label": "Next Photo (3/24)"
-  }
-}
-```
-
-```ts
-interface CapabilityUpdatePayload {
-  capabilityId: string;
-  icon?: string | null;
-  label?: string;
-  state?: number;
-}
-```
-
-- **Fields other than `capabilityId` are sparse**, using the same
-  unchanged-if-omitted / explicit-`null`-resets-icon semantics as `render_update`'s
-  `icon` field (see [Icon and label content](#icon-and-label-content) above for format
-  and length guidance — it applies here too).
-- **Each present field is validated independently**: `icon` must be a string or `null`;
-  `label` must be a string; `state` must be a number. A field that fails validation is
-  simply not applied — left at its existing stored value, exactly as if it had been
-  omitted — while any other, validly-typed field in the same message still applies.
-  Gatoway core reports rejected field(s) via a follow-up
-  [`error`](#capability-validation-errors) message; see that section for the exact
-  shape.
-- **A plugin may only update capabilities it has itself declared.** Gatoway core looks
-  `capabilityId` up within the *sending connection's own* registered capabilities only;
-  an id that isn't among them is ignored (logged, not an error) — a plugin can never
-  reach into another connection's capabilities this way.
-- **No acknowledgement message.**
-- **Rendered immediately if relevant.** If the sending connection currently has focus
-  and the updated capability is bound to a position in its layout, Gatoway core
-  immediately sends the Stream Deck plugin a fresh `render_update` reflecting the
-  change — an application doesn't have to wait for the user to press something, or for
-  a focus change, to see its own pushed update take effect. If the sending connection
-  isn't currently focused, the update is still stored (so it's reflected next time that
-  connection gains focus), but nothing is rendered right away.
+**Rendered immediately if relevant.** If the sending connection currently has focus,
+Gatoway core immediately re-derives and sends the Stream Deck plugin fresh
+`render_update`s for every position that changed, exactly as a focus change does. If the
+sending connection isn't currently focused, the new content is simply stored for next
+time that connection gains focus — nothing is rendered right away.
 
 ## Example: a full focus/input/render/update cycle
 
-1. An application plugin connects, authenticates, and sends `register` declaring a
-   `next-photo` button capability.
-2. It sends `focus: { focused: true }` when its window becomes active.
-3. Gatoway core sends the Stream Deck plugin a `render_update` for every position bound
-   in that application's layout (e.g. `{ label: "Next Photo" }` at row 0, column 1).
-4. The user presses that physical key. The Stream Deck plugin sends
+1. An application plugin connects, authenticates, and sends `register` declaring
+   `content.buttons: [{ "label": "Next Photo" }]`.
+2. Gatoway core sends it `slot_capacity` reflecting the Stream Deck plugin's current
+   device capacity.
+3. It sends `focus: { focused: true }` when its window becomes active.
+4. Gatoway core sends the Stream Deck plugin a `render_update` for the physical position
+   corresponding to ordinal index 0 in the latest `device_capacity` report (e.g.
+   `{ label: "Next Photo" }` at row 0, column 1), plus a fresh `slot_capacity` to the
+   now-focused connection.
+5. The user presses that physical key. The Stream Deck plugin sends
    `input_event: { controller: "keypad", position: { row: 0, column: 1 }, eventType:
    "keyDown" }`.
-5. Gatoway core resolves that position against the focused connection's layout,
-   finds the `next-photo` capability, and sends that connection
-   `command: { capabilityId: "next-photo", eventType: "keyDown" }`.
-6. The application plugin acts on it (e.g. advances to the next photo), and pushes
-   `capability_update: { capabilityId: "next-photo", label: "Next Photo (4/24)" }` to
-   reflect the new position in its own photo sequence. Since this connection is still
-   focused and `next-photo` is still bound at row 0, column 1, Gatoway core immediately
-   sends the Stream Deck plugin a fresh `render_update` for that position with the
-   updated label — no further key press or focus change needed.
-7. When the application loses focus (or disconnects), Gatoway core sends the Stream
-   Deck plugin a fresh `render_update` sweep reflecting the built-in idle appearance
-   (`icon: null`, explicitly resetting any icon the previous capability displayed).
+6. Gatoway core resolves that position to ordinal index 0 via the latest
+   `device_capacity` report, finds an entry at that index in the focused connection's
+   `content.buttons`, and sends that connection
+   `command: { controller: "keypad", slotIndex: 0, eventType: "keyDown" }`.
+7. The application plugin acts on it (e.g. advances to the next photo), and re-sends
+   `register` with `content.buttons: [{ "label": "Next Photo (4/24)" }]` to reflect the
+   new position in its own photo sequence. Since this connection is still focused,
+   Gatoway core immediately sends the Stream Deck plugin a fresh `render_update` for that
+   same position with the updated label — no further key press or focus change needed.
+8. When the application loses focus (or disconnects), Gatoway core sends the Stream
+   Deck plugin a fresh `render_update` sweep, spanning every position in the latest
+   `device_capacity` report, reflecting the built-in idle appearance (`icon: null`,
+   explicitly resetting any icon the previous content displayed).
