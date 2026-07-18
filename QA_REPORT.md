@@ -1687,3 +1687,24 @@ Full suite and typecheck re-run directly in this session (not taken from the dev
 **Recommendation:** ✅ **Pass** — QA-021 (Major, design-level) and QA-022 (Minor, code-level) are both confirmed genuinely resolved under direct code tracing, not just trust in the developer's report or the design doc's stated intent: `null`-vs-zero capacity is correctly distinguished throughout, the broadcast reaches every connected application plugin (verified with a two-connection test), no retroactive re-validation occurs anywhere in the codebase, and the canonical-label-form fix is precise and applies uniformly regardless of whether capacity is known. Both workspaces' full test suites (138/138, 102/102) and typechecks were independently re-run and are clean. One new Minor finding, QA-023, is a test-coverage gap (not a functional defect) and does not block proceeding. The README staleness Observation is confirmed real but explicitly out of this fix's scope and non-blocking — route to `doc-writer`, not back to the developer, once the change is otherwise ready to archive. This change is ready to resume `/verify`'s paused live checks (physical key press → `command` resolution, re-registration re-render, overflow rendering, profile-switch capacity transitions), and, once that passes, to proceed toward archival.
 
 ---
+
+## Resumed session (2026-07-17/18) — live end-to-end with the real xDender extension
+
+**Scope:** Resumed `/verify`'s paused live checks against `extension-provided-slot-content` HEAD `8031538`, this time with the real xDender browser extension (Firefox), not the manual test client. Fresh clean rebuild of both workspaces; Firefox origin allowlist (`moz-extension://*`) configured via `allowed-origins.json` and confirmed loaded.
+
+**Live-confirmed, against real hardware and a real third-party plugin:**
+- **`device_capacity` correctly reports the device's full physical layout** (8 button positions in a 4×2 grid, 4 dial positions) derived from `Device.size`/`Device.type` — not merely what was placed — confirmed by comparing the logged payload directly against the real Stream Deck+'s known hardware shape.
+- **xDender registered successfully** with `pluginType: "xdesign"` and 8 real capabilities (Create Sketch, Circle, Fillet, Extrude, Line, Rectangle, Chamfer, Test), all validated cleanly (no rejected entries).
+- **`slot_capacity` delivered correctly** (`{buttonSlots: 8, dialSlots: 4}`) both post-registration and again on focus-gain.
+- **Full render sweep correct on focus-gain**: all 8 declared button labels rendered at their correct physical positions (matching `device_capacity`'s position-list order exactly), all 4 dials correctly left at the idle appearance (xDender declared no dial content).
+- **Idle sweep correct on blur**: all 8 button + 4 dial positions swept back to the idle appearance (`icon: null`, `label: "Gatoway"`) in one pass, no stale content left behind.
+- **Reconnection behavior confirmed twice, independently**: Gatoway core was killed (both a bare child-process kill, auto-restarted by the Stream Deck plugin's own supervisor in ~3s, and a full Stream Deck app quit/relaunch for an extended-downtime test) and xDender correctly detected the dropped WebSocket connection each time, reconnected as a genuinely new connection (fresh connection ID), sent a **complete fresh `register`** (not assuming any prior state carried over), and **explicitly re-sent `focus: true`** — exactly matching the Reconnection section's documented contract. No manual intervention or special handling was needed on either side.
+- **No warnings or errors** in Gatoway core's log from any connection or process belonging to this session (a set of stale `authentication_failed` entries in the log file are from a leftover process (`pid 45336`) predating this session's rebuild, already previously confirmed unrelated to xDender).
+
+**No new findings.** Every specific behavior this live session set out to confirm — real device-capacity reporting, real third-party registration/validation, focus-driven render/idle sweeps, and reconnection — passed cleanly against real hardware and the real xDender extension, not just the manual test client or automated suite.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass.** `/verify` is complete for `extension-provided-slot-content`. All QA findings from every review round (QA-020 through QA-023) are resolved and confirmed; live verification against real hardware and a real third-party plugin (xDender) found no further issues, including a from-scratch confirmation of reconnection behavior under the new protocol. This change is ready for `doc-writer` (note the still-open, out-of-scope Observation: `gatoway-core/README.md` describes the superseded model and has a dead anchor link — sweep this up in the same pass) and then `/opsx:archive`.
+
+---
