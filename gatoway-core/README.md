@@ -9,12 +9,14 @@ protocol.
 This package implements the connection/authentication/protocol/logging foundation
 (`gatoway-core-foundation`) plus focus tracking (which single connection, if any,
 currently has focus), profile routing (resolving physical Stream Deck input against the
-focused connection's own declared content and forwarding a `command`), and live
-slot-capacity tracking: the Stream Deck plugin reports its connected device's live
-button/dial slot capacity (`device_capacity`), and Gatoway core forwards each
-application plugin the counts (`slot_capacity`) and resolves that plugin's ordinally-
-addressed `content` against physical positions on its behalf (`extension-provided-slot-
-content`; see [Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+focused connection's own declared content and forwarding a `command`), and device-
+capacity tracking: the Stream Deck plugin reports the connected device's fixed physical
+button/dial capacity (`device_capacity`), and Gatoway core forwards each application
+plugin just the counts (`slot_capacity`, `number | null` — `null` meaning "not yet
+known," distinct from a known `0`) and resolves that plugin's content — a flat map keyed
+by fixed physical-position label, e.g. `"B1"`, `"D1"` — against physical positions on its
+behalf (`extension-provided-slot-content`; see
+[Slot capacity and label-addressed content](../docs/PROTOCOL.md#slot-capacity-and-label-addressed-content)
 in the protocol reference). Gatoway core persists no app-specific configuration to disk
 — only the auth token file and rotating logs. See
 [Current Scope and Limitations](#current-scope-and-limitations) for what is deliberately
@@ -141,10 +143,10 @@ As of `extension-provided-slot-content`, Gatoway core persists **no** app-specif
 configuration to disk — the earlier `layout.json` file (hand-authoring a position ->
 capability-id mapping per plugin type) has been removed entirely, along with its
 supporting code (`layoutConfig.ts`, `layoutStore.ts`) and the `GATOWAY_LAYOUT_FILE`
-environment variable. Physical slot capacity is now reported live by the Stream Deck
-plugin, and each connected application plugin declares its own content sized to fit,
-addressed purely by ordinal position — see
-[Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+environment variable. The Stream Deck plugin reports the connected device's fixed
+physical button/dial capacity, and each connected application plugin declares its own
+content sized to fit, addressed by fixed position label (e.g. `"B1"`, `"D1"`) — see
+[Slot capacity and label-addressed content](../docs/PROTOCOL.md#slot-capacity-and-label-addressed-content)
 in the protocol reference for the full mechanism. If you have an old `layout.json` file
 from before this change, it is simply no longer read and can be deleted.
 
@@ -181,18 +183,20 @@ client:
 npm run manual:test-app-client
 ```
 
-It registers a small fixture `content` (two buttons, one dial — addressed only by
-ordinal position, never an id) under `pluginType: "test-app"`, and accepts `focus` /
-`blur` / `update` / `quit` commands typed at the prompt — see
+It registers a small fixture `content` (two buttons, one dial — keyed by fixed position
+label, `"B1"`/`"B2"`/`"D1"`, never an id or ordinal index) under `pluginType:
+"test-app"`, and accepts `focus` / `blur` / `update` / `quit` commands typed at the
+prompt — see
 [`stream-deck-plugin/README.md`](../stream-deck-plugin/README.md#exercising-the-mechanism-without-a-real-application-plugin)
 for the full walkthrough of what each command does.
 
 **No layout config file is needed to see this render anymore.** Gatoway core resolves
 this client's declared content directly against whatever physical button/dial slots the
-Stream Deck plugin reports via `device_capacity` — place at least two generic Key
-actions and one generic Dial action on the connected device to see the full fixture; any
-extra declared entries beyond what's currently placed simply aren't rendered anywhere
-(safe underflow, matching `REQUIREMENTS.md` FR-007).
+Stream Deck plugin's fixed hardware capacity report (`device_capacity`) currently
+describes — place at least two generic Key actions and one generic Dial action on the
+connected device to see the full fixture; any declared label with no generic action
+placed at its corresponding physical position simply isn't rendered anywhere (safe
+underflow, matching `REQUIREMENTS.md` FR-007).
 
 ## Message protocol
 
@@ -206,8 +210,9 @@ Every message, on either transport, shares one JSON envelope:
 - **WebSocket:** one JSON object per text frame.
 
 The full message set, as of `extension-provided-slot-content`:
-- `register` (plugin → core): declares `pluginType` and ordinally-addressed `content`
-  (`{ buttons: SlotContent[], dials: SlotContent[] }`); TCP clients also include their
+- `register` (plugin → core): declares `pluginType` and label-addressed `content`
+  (`Record<string, SlotContent>`, keyed by fixed physical-position label like `"B1"`,
+  `"D1"` — a flat map, not separate button/dial arrays); TCP clients also include their
   auth `token`. Re-sending `register` is the only mechanism for any content change.
 - `register_ack` (core → plugin): `status: "ok" | "rejected"`, the assigned
   `connectionId`, and a `reason` on rejection.
@@ -219,16 +224,22 @@ The full message set, as of `extension-provided-slot-content`:
   down/up, dial rotate/push) at a given position — no app-specific meaning attached.
 - `render_update` (core → Stream Deck plugin): what to display at a given position
   (icon/label/state), including the built-in idle appearance when nothing is focused.
-- `command` (core → focused application connection): an `input_event` resolved against
-  an ordinal index within that connection's own declared content.
-- `device_capacity` (Stream Deck plugin → core): the ordered list of physical positions
-  currently holding a generic Key/Dial action.
+- `command` (core → focused application connection): an `input_event` resolved against a
+  fixed label (`{ label, eventType, delta? }`) within that connection's own declared
+  content.
+- `device_capacity` (Stream Deck plugin → core): the ordered list of physical button
+  positions and the ordered list of physical dial positions the connected device
+  physically has, derived from its hardware — not from which positions currently have a
+  generic action placed on them.
 - `slot_capacity` (core → application plugin): how many button/dial slots that
-  connection currently has to fill, derived from the latest `device_capacity` report.
+  connection currently has to fill (`number | null` — `null` meaning capacity isn't
+  known yet, distinct from a known `0`), derived from the latest `device_capacity`
+  report and also broadcast to every connected application plugin whenever capacity
+  first becomes known or subsequently changes.
 
 See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full reference — envelope,
 every payload shape, the `icon` field's null-vs-omitted reset semantics, pixel-dimension
-guidance, and how ordinal-index resolution actually works — rather than the abbreviated
+guidance, and how label resolution actually works — rather than the abbreviated
 summary above. The [`message-protocol` spec](../openspec/specs/message-protocol/spec.md)
 covers the full, current message set, consolidated as each introducing/superseding
 change is archived.
@@ -263,15 +274,16 @@ tracking (`extension-provided-slot-content`, delivery-sequence step 7 — see
 - **A Stream Deck plugin now exists** ([`../stream-deck-plugin/`](../stream-deck-plugin/))
   that spawns, supervises, and connects to Gatoway core as a client, renders Gatoway's
   generic, position-based Key/Dial actions on physical Stream Deck hardware — including
-  the built-in idle appearance when nothing is focused — and reports the device's live
-  slot capacity. It registers with no declared `content` of its own (it is the display
-  client, not an application connection) — see that package's own README for its scope.
-- **Focus tracking and profile routing work end to end, entirely by ordinal position.**
-  Gatoway core tracks which single connection (if any) currently has focus, resolves
-  physical `input_event`s against an ordinal index within that connection's own declared
-  content (via the Stream Deck plugin's live `device_capacity` report), forwards
-  resolved `command`s, and keeps the Stream Deck plugin's display in sync with focus
-  changes, falling back to the idle appearance when nothing is focused.
+  the built-in idle appearance when nothing is focused — and reports the connected
+  device's fixed physical slot capacity. It registers with no declared `content` of its
+  own (it is the display client, not an application connection) — see that package's own
+  README for its scope.
+- **Focus tracking and profile routing work end to end, addressed by fixed position
+  label.** Gatoway core tracks which single connection (if any) currently has focus,
+  resolves physical `input_event`s against a fixed label (e.g. `"B1"`, `"D1"`) within
+  that connection's own declared content (via the Stream Deck plugin's `device_capacity`
+  report), forwards resolved `command`s, and keeps the Stream Deck plugin's display in
+  sync with focus changes, falling back to the idle appearance when nothing is focused.
 - **Live content updates work by re-sending `register`.** A connection updates its own
   displayed content — a live label/state change, paging, entering/leaving a nested group
   — by re-sending `register` with its complete, current `content` at any time after
@@ -279,11 +291,11 @@ tracking (`extension-provided-slot-content`, delivery-sequence step 7 — see
   that connection is currently focused (`REQUIREMENTS.md` FR-001/FR-008). There is no
   separate, lighter-weight update message.
 - **No host-side layout config file exists anymore.** Gatoway core persists nothing
-  app-specific to disk. Physical slot capacity is reported live by the Stream Deck
-  plugin (`device_capacity`) and forwarded to each application plugin as counts
-  (`slot_capacity`); each plugin declares content sized to fit, addressed purely by
-  ordinal position — see
-  [Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+  app-specific to disk. The Stream Deck plugin reports the device's fixed physical
+  button/dial capacity (`device_capacity`), Gatoway core forwards each application
+  plugin the counts (`slot_capacity`, `number | null`); each plugin declares content
+  sized to fit, addressed by fixed position label — see
+  [Slot capacity and label-addressed content](../docs/PROTOCOL.md#slot-capacity-and-label-addressed-content)
   in the protocol reference for the full mechanism. This supersedes the earlier
   `persisted-layout-config` change's `layout.json` file entirely.
 - **No real application plugins exist yet** (no Lightroom adapter, no xDesign/xDender

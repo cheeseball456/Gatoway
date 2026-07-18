@@ -12,9 +12,9 @@ Gatoway core. Neither action has any app-specific or even idle-specific knowledg
 into it — the plugin only forwards raw physical events (`input_event`) and renders
 whatever Gatoway core instructs (`render_update`), including the built-in idle
 appearance shown when no application currently has focus. As of
-`extension-provided-slot-content`, it additionally reports the connected device's live
-button/dial slot capacity to Gatoway core (`device_capacity`) — see
-[How it reports live slot capacity](#how-it-reports-live-slot-capacity) below. There is
+`extension-provided-slot-content`, it additionally reports the connected device's fixed
+physical button/dial slot capacity to Gatoway core (`device_capacity`) — see
+[How it reports device capacity](#how-it-reports-device-capacity) below. There is
 still no application-specific plugin work in this repository (no Lightroom or xDesign
 integration) — see [Scope and limitations](#scope-and-limitations).
 
@@ -154,14 +154,16 @@ npm run manual:test-app-client --workspace=gatoway-core
 ```
 
 This connects to Gatoway core, registers as `pluginType: "test-app"` declaring a small
-fixture `content` (two buttons, one dial — addressed only by ordinal position), and then
-accepts commands typed at the prompt. **No layout config file is needed anymore** —
-Gatoway core resolves this fixture content directly against whatever physical
-button/dial slots this plugin currently reports via `device_capacity`. Place at least
-two generic Key actions and one generic Dial action on the connected device (see
+fixture `content` (two buttons, one dial, keyed by fixed position label — `"B1"`,
+`"B2"`, `"D1"`, never an id or ordinal index), and then accepts commands typed at the
+prompt. **No layout config file is needed anymore** — Gatoway core resolves this
+fixture content directly against whatever physical button/dial capacity this plugin
+currently reports via `device_capacity`. Place at least two generic Key actions and one
+generic Dial action on the connected device (see
 [Placing the generic actions](#placing-the-generic-actions-manual-one-time) above) to
-see the full fixture; any extra declared entries beyond what's currently placed simply
-aren't rendered anywhere (safe underflow, matching `REQUIREMENTS.md` FR-007):
+see the full fixture; any declared label with no generic action placed at its
+corresponding physical position simply isn't rendered anywhere (safe underflow, matching
+`REQUIREMENTS.md` FR-007):
 
 - **`focus`** — reports `focused: true`. Should render the test fixture's two buttons
   and one dial on whatever physical slots are currently placed, replacing the idle
@@ -179,8 +181,9 @@ aren't rendered anywhere (safe underflow, matching `REQUIREMENTS.md` FR-007):
 
 Any `command` message Gatoway core sends back (a rendered button/dial press or turn on
 the real hardware while this test-double is focused) is printed to the console as it
-arrives, identified by its ordinal `slotIndex` rather than any id. This script is
-genuinely useful beyond any single change's own verification — anyone developing or
+arrives, identified by its fixed `label` (e.g. `"B1"`) rather than any id or ordinal
+index. This script is genuinely useful beyond any single change's own verification —
+anyone developing or
 testing Gatoway further, including whoever eventually adapts the real Lightroom plugin,
 can use it to exercise the full mechanism without needing a real application plugin
 connected. See [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md) for the full message
@@ -207,32 +210,38 @@ application connection with its own content to fill physical slots. It forwards
 physical `input_event`s and applies `render_update`s exactly as described in
 [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md).
 
-## How it reports live slot capacity
+## How it reports device capacity
 
-Once connected and registered, the plugin also reports the connected device's live
-button/dial slot capacity to Gatoway core via `device_capacity`
-(`extension-provided-slot-content`, `ARCHITECTURE.md` AD-9) —
-[`src/coreClient/deviceCapacity.ts`](src/coreClient/deviceCapacity.ts) derives the
-ordered list of physical positions currently holding this plugin's own generic Key
-action, and the ordered list holding its generic Dial action, from the Elgato SDK's live
-`Device.size`/`Device.actions` info:
+Once connected and registered, the plugin also reports the connected device's **fixed
+physical** button/dial capacity to Gatoway core via `device_capacity`
+(`extension-provided-slot-content`, `ARCHITECTURE.md` AD-9, amended v1.7 for QA-020) —
+[`src/coreClient/deviceCapacity.ts`](src/coreClient/deviceCapacity.ts)'s
+`computeDeviceCapacity` derives the ordered list of physical button positions and the
+ordered list of physical dial positions directly from the connected device's hardware
+facts, `Device.size` (button grid rows/columns) and `Device.type` (looked up in a
+hand-authored `DeviceType` → dial-count table, since the Elgato SDK exposes dial count
+only in that enum's own documentation prose, not as a runtime field) — **not** from
+which positions currently have a generic Key/Dial action placed on them:
 
-- Sent once immediately after this connection's own registration, and again any time the
-  derived lists actually change — a generic action placed/removed (`onWillAppear`/
-  `onWillDisappear`), or a device connected/disconnected.
-- **Order is stabilized independently of the Elgato SDK's own `actions` iterator**
-  (not documented as stable): keys are sorted in reading order (row ascending, then
-  column ascending within a row); dials are sorted by ascending index. This keeps
-  ordinal index N consistently meaning the same physical position across repeated
-  reports, until capacity actually changes.
-- Only this plugin's own generic Key/Dial actions are counted — any other action (a
-  folder, a third-party plugin's action, etc.) placed on the same device is not a
-  "generic" slot Gatoway core can address, and is excluded.
+- Sent once immediately after this connection's own registration, and again only if the
+  connected device itself changes — connected, disconnected, or swapped for a different
+  model (`onDeviceDidConnect`/`onDeviceDidDisconnect`/`onDeviceDidChange`). Placing or
+  removing a generic Key/Dial action does **not** trigger a new report, since physical
+  capacity hasn't changed — this plugin no longer listens for `onWillAppear`/
+  `onWillDisappear` at all (v1.7's simplification over the original placement-tracking
+  design).
+- **Order is stabilized independently of the Elgato SDK's own iteration order** (not
+  documented as stable): keys are generated in reading order (row ascending, then column
+  ascending within a row); dials are generated in ascending index order. This keeps
+  label N (`"B" + (N+1)` / `"D" + (N+1)`) consistently meaning the same physical
+  position across repeated reports, for as long as the connected device itself doesn't
+  change — unlike a live-placement-derived order, it no longer shuffles due to unrelated
+  placement changes.
 
-This is what lets Gatoway core resolve an application plugin's ordinally-addressed
-`content` directly against physical positions, with no separate host-side layout config
-file — see
-[Slot capacity and ordinal content](../docs/PROTOCOL.md#slot-capacity-and-ordinal-content)
+This is what lets Gatoway core resolve an application plugin's label-addressed `content`
+(keyed by fixed position label, e.g. `"B1"`, `"D1"`) directly against physical
+positions, with no separate host-side layout config file — see
+[Slot capacity and label-addressed content](../docs/PROTOCOL.md#slot-capacity-and-label-addressed-content)
 in the protocol reference for the full mechanism.
 
 ## Configuration
@@ -344,18 +353,19 @@ action model plus focus/profile routing on the Gatoway core side
 reporting (`extension-provided-slot-content`, delivery-sequence step 7 — see
 `../ARCHITECTURE.md`'s Delivery Sequence). As of the most recent change:
 
-- **Command forwarding, profile routing, and focus tracking all work end to end, purely
-  by ordinal position** — Gatoway core resolves a physical key press or dial turn
-  (translated to an ordinal index via this plugin's own live `device_capacity` report)
-  against whichever connection currently has focus and forwards a `command`, and
-  switches the Stream Deck's display between an application's declared content and the
-  built-in idle appearance as focus changes. All of this has been verified live against
-  real Stream Deck+ hardware using a test-double application client (see
+- **Command forwarding, profile routing, and focus tracking all work end to end,
+  addressed by fixed position label** — Gatoway core resolves a physical key press or
+  dial turn (translated to a fixed label, e.g. `"B1"`, via this plugin's own
+  `device_capacity` report) against whichever connection currently has focus and
+  forwards a `command`, and switches the Stream Deck's display between an application's
+  declared content and the built-in idle appearance as focus changes. All of this has
+  been verified live against real Stream Deck+ hardware using a test-double application
+  client (see
   [Exercising the mechanism without a real application plugin](#exercising-the-mechanism-without-a-real-application-plugin)
   above), since no real Lightroom/xDesign plugin exists yet.
-- **This plugin now reports live slot capacity to Gatoway core** (`device_capacity`,
-  `ARCHITECTURE.md` AD-9) — see
-  [How it reports live slot capacity](#how-it-reports-live-slot-capacity) above. There is
+- **This plugin now reports the connected device's fixed physical capacity to Gatoway
+  core** (`device_capacity`, `ARCHITECTURE.md` AD-9) — see
+  [How it reports device capacity](#how-it-reports-device-capacity) above. There is
   no separate, host-side layout config file anymore: Gatoway core resolves an
   application plugin's declared content directly against whatever this plugin currently
   reports.

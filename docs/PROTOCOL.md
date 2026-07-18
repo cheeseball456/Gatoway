@@ -498,6 +498,47 @@ An application plugin with more content than it has slots for (or logically grou
 content) manages its own paging/grouping and simply re-`register`s the right-sized subset
 to currently show — Gatoway core never needs to know this is happening.
 
+### Paging and nested content: a worked pattern
+
+`REQUIREMENTS.md` FR-008 requires this, but doesn't prescribe an implementation — this
+section fills that gap for a new plugin author. The mechanism is entirely client-side:
+Gatoway core has no "page" or "group" concept at all, only whatever `content` a
+connection currently declares. The pattern that satisfies FR-008 without any new
+protocol surface is:
+
+1. **Reserve one of your own labels as a navigation gesture**, not real content — e.g.
+   the plugin's last button slot always means "next page" (or "enter this group" /
+   "back out of this group," if nesting rather than paging). Declare it with whatever
+   icon/label communicates that to the user (e.g. `{ "label": "More →" }`).
+2. **When a `command` arrives for that reserved label, do not forward it to your own
+   underlying application.** Intercept it in the plugin itself.
+3. **Advance your own internal page/group state** (e.g. increment a `currentPage`
+   index, or push/pop a `currentGroup` stack) and compute the next right-sized content
+   set to show.
+4. **Re-`register` with that new `content` map.** Since `register` always fully
+   replaces a connection's previously-declared content (see
+   [`register`](#register-plugin--core) above), this is the same mechanism used for any
+   other live content change — there is no separate "page" message. If this connection
+   is currently focused, Gatoway core immediately re-renders the Stream Deck to reflect
+   the new page/group, with no further `input_event` needed.
+
+Concretely, with a 3-button device and 5 logical commands to expose: declare
+`B1`/`B2` as the first two commands and `B3` as "next page"; on `command: { label:
+"B3" }`, re-`register` with `B1`/`B2` as commands 3-4 and `B3` still meaning "next page"
+(or "back to page 1," once you've cycled through). Nesting several variants of one tool
+under a single entry point (e.g. multiple Rectangle-drawing variants in a CAD tool)
+works the same way: one label enters the group, showing its variants using the same
+reserved-label convention to back out.
+
+This is not a new invention: it mirrors how the existing Lightroom Stream Deck Plugin
+already manages its own internal panel/page state today, entirely on its own side of
+its (pre-Gatoway) Stream Deck bridge — Gatoway's `content`/`register` mechanism gives an
+application plugin the same freedom, without Gatoway itself needing any paging/grouping
+concept of its own (`REQUIREMENTS.md` FR-008). This is exactly the case xDender needed
+this mechanism for during this change's own live verification: paging through more
+commands than fit in the available slots, and nesting several tool variants (e.g.
+multiple Rectangle types) under one entry point.
+
 ## Position-addressed input and rendering (Stream Deck ↔ core)
 
 These three message types implement Gatoway's generic, position-based action model:
