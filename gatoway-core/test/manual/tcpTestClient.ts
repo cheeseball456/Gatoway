@@ -25,7 +25,7 @@ async function attempt(port: number, token: string, label: string): Promise<void
         encodeNdjsonLine(
           encodeMessage({
             type: "register",
-            payload: { pluginType: "manual-test-client", capabilities: [], token },
+            payload: { pluginType: "manual-test-client", token },
           }),
         ),
       );

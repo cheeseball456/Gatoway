@@ -8,8 +8,6 @@ import { ConnectionManager } from "./connection/connectionManager.js";
 import { startTcpListener, type TcpListenerHandle } from "./connection/tcpListener.js";
 import { startWsListener, type WsListenerHandle } from "./connection/wsListener.js";
 import { FocusTracker } from "./focus/focusTracker.js";
-import { createLayoutResolver } from "./routing/configLayoutResolver.js";
-import { LayoutStore } from "./routing/layoutStore.js";
 import { ProfileRouter } from "./routing/profileRouter.js";
 
 export type { GatowayCoreConfig } from "./config.js";
@@ -18,10 +16,9 @@ export type { ConnectionRecord, ConnectionState, Transport } from "./connection/
 export type { ProtocolRouter } from "./connection/protocolRouter.js";
 export type { GatowayMessage } from "./protocol/envelope.js";
 export type {
-  Capability,
-  CapabilityUpdatePayload,
   CommandPayload,
   Controller,
+  DeviceCapacityPayload,
   EncoderPosition,
   ErrorPayload,
   FocusPayload,
@@ -30,15 +27,14 @@ export type {
   KeypadPosition,
   Position,
   RegisterAckPayload,
+  RegisterContent,
   RegisterPayload,
   RenderUpdatePayload,
+  SlotCapacityPayload,
+  SlotContent,
 } from "./protocol/messages.js";
 export { FocusTracker } from "./focus/focusTracker.js";
 export type { FocusChangeEvent, FocusChangeReason } from "./focus/focusTracker.js";
-export type { LayoutResolver, PositionRef } from "./routing/layoutResolver.js";
-export { createLayoutResolver } from "./routing/configLayoutResolver.js";
-export { LayoutStore } from "./routing/layoutStore.js";
-export type { LayoutBinding, LayoutConfigFile, LayoutProfileConfig } from "./routing/layoutConfig.js";
 export { ProfileRouter, STREAM_DECK_PLUGIN_TYPE } from "./routing/profileRouter.js";
 
 export interface GatowayCoreHandle {
@@ -48,12 +44,9 @@ export interface GatowayCoreHandle {
   /** Tracks which connection (if any) currently has focus (focus-tracking capability). */
   readonly focusTracker: FocusTracker;
   /**
-   * Owns the loaded layout config (layout-persistence capability): read access backs
-   * `profileRouter`'s resolution; `setBinding`/`removeBinding`/`save()` are unused by
-   * this change but exposed here as the API surface a future no-code mapping UI needs.
+   * Resolves input_events and drives render_updates, live slot-capacity tracking, and
+   * slot_capacity delivery (profile-routing / stream-deck-core-lifecycle capabilities).
    */
-  readonly layoutStore: LayoutStore;
-  /** Resolves input_events and drives render_updates (profile-routing capability). */
   readonly profileRouter: ProfileRouter;
   /** The loopback addresses/ports actually bound by the TCP and WebSocket listeners. */
   readonly tcpAddresses: { address: string; port: number }[];
@@ -107,15 +100,11 @@ export async function startGatowayCore(
 
   const manager = new ConnectionManager(logger);
 
-  // layout-persistence (persisted-layout-config design.md D4/D5): load() never throws -
-  // a missing or malformed config file logs a clear message and falls back to an empty
-  // in-memory layout (every position unbound), rather than aborting startup.
-  const layoutStore = new LayoutStore({ filePath: config.layoutFilePath, logger });
-  await layoutStore.load();
-
   const focusTracker = new FocusTracker(logger);
-  const layoutResolver = createLayoutResolver(layoutStore);
-  const profileRouter = new ProfileRouter({ manager, focusTracker, layoutResolver, logger });
+  // extension-provided-slot-content: Gatoway core persists no app-specific
+  // configuration to disk as of this change (design.md D7) - slot capacity and
+  // declared content both live in memory only, owned by ProfileRouter/ConnectionManager.
+  const profileRouter = new ProfileRouter({ manager, focusTracker, logger });
   manager.onDisconnect((record) => profileRouter.handleDisconnect(record.id));
 
   const tcpHandle: TcpListenerHandle = await startTcpListener({
@@ -144,7 +133,6 @@ export async function startGatowayCore(
     manager,
     logger,
     focusTracker,
-    layoutStore,
     profileRouter,
     tcpAddresses: tcpHandle.addresses,
     wsAddresses: wsHandle.addresses,

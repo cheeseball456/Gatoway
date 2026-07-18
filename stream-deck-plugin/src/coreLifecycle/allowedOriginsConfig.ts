@@ -66,8 +66,8 @@ export function resolveAllowedOriginsFilePath(env: NodeJS.ProcessEnv, configDir:
  * Reads and parses the allowed-origins config file at `filePath`, read once at plugin
  * startup (no hot-reload, design.md Non-Goals). Missing file, invalid JSON, and
  * valid-JSON-wrong-shape all fail safe to an empty allowlist with a clear log message
- * (design.md D4, tasks.md 1.4) - mirroring `gatoway-core`'s `LayoutStore.load()`
- * four-case log pattern (missing / invalid JSON / invalid shape / loaded successfully) -
+ * (design.md D4, tasks.md 1.4) - a four-case log pattern (missing / invalid JSON /
+ * invalid shape / loaded successfully) this project uses for its local config files -
  * never thrown past this function.
  */
 export function loadAllowedOrigins(filePath: string, logger: PluginLogger): string[] {

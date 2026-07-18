@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../logging/logger.js";
-import type { Capability } from "../protocol/messages.js";
+import type { RegisterContent } from "../protocol/messages.js";
 import type { ConnectionRecord, ConnectionState, Transport } from "./types.js";
 
 const STATE_ORDER: readonly ConnectionState[] = [
@@ -111,14 +111,14 @@ export class ConnectionManager {
     }
   }
 
-  /** Records the plugin's declared type and capability manifest from its `register` message. */
-  setPluginInfo(id: string, pluginType: string, capabilities: Capability[]): void {
+  /** Records the plugin's declared type and content from its `register` message. */
+  setPluginInfo(id: string, pluginType: string, content: RegisterContent): void {
     const record = this.connections.get(id);
     if (!record) {
       return;
     }
     record.pluginType = pluginType;
-    record.capabilities = capabilities;
+    record.content = content;
   }
 
   /** Marks a connection disconnected and removes it from active tracking (tasks.md 3.6). */

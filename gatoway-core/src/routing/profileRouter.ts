@@ -1,25 +1,28 @@
 import type { ConnectionManager } from "../connection/connectionManager.js";
-import { sendError, sendMessage } from "../connection/messageHandler.js";
+import { sendMessage } from "../connection/messageHandler.js";
 import type { ProtocolRouter } from "../connection/protocolRouter.js";
 import type { ConnectionRecord } from "../connection/types.js";
 import type { FocusTracker } from "../focus/focusTracker.js";
 import type { Logger } from "../logging/logger.js";
-import { validateCapabilityUpdateFields } from "../protocol/capabilityValidation.js";
 import type {
-  CapabilityUpdatePayload,
   CommandPayload,
+  Controller,
+  DeviceCapacityPayload,
   FocusPayload,
   InputEventPayload,
+  Position,
+  RegisterContent,
   RenderUpdatePayload,
+  SlotCapacityPayload,
 } from "../protocol/messages.js";
-import { findCapability } from "./capabilityLookup.js";
-import type { LayoutResolver } from "./layoutResolver.js";
+import { samePosition } from "./position.js";
 
 /**
  * The plugin type the Stream Deck plugin declares at registration (matches
  * `stream-deck-plugin/src/coreClient/coreClient.ts`'s `PLUGIN_TYPE`). Only this
  * connection ever receives `render_update` messages (design.md D4/D5, AD-8): it is the
- * one physical display Gatoway core drives.
+ * one physical display Gatoway core drives. It is also the only connection allowed to
+ * send `device_capacity` (extension-provided-slot-content design.md D1).
  */
 export const STREAM_DECK_PLUGIN_TYPE = "stream-deck";
 
@@ -29,41 +32,68 @@ const IDLE_LABEL = "Gatoway";
 export interface ProfileRouterOptions {
   manager: ConnectionManager;
   focusTracker: FocusTracker;
-  layoutResolver: LayoutResolver;
   logger: Logger;
 }
 
 /**
- * Implements the `profile-routing` capability (design.md D3/D4/D7): resolves incoming
- * `input_event`s against the currently-focused connection's bound capability, keeps the
- * Stream Deck plugin's display in sync with focus changes - the focused connection's
- * bound layout, or the built-in idle appearance when nothing is focused - and applies
- * live `capability_update`s a connection pushes for its own already-declared
- * capabilities, immediately re-rendering when the update affects what's on screen.
+ * Implements the `profile-routing`/`stream-deck-core-lifecycle` capabilities
+ * (extension-provided-slot-content design.md D1-D6/D9, amended v1.7 for QA-020, further
+ * amended v1.8 for QA-021/QA-022): tracks the Stream Deck plugin's latest fixed
+ * device-capacity report (distinguishing "not yet known" from a known zero, D2),
+ * resolves incoming `input_event`s against the currently-focused connection's own
+ * declared, label-addressed content, keeps the Stream Deck plugin's display in sync
+ * with focus changes and live content updates (re-sent `register`), and delivers
+ * `slot_capacity` to each application plugin at connection time, on every focus gain,
+ * and, unsolicited, to every currently-connected application plugin whenever capacity
+ * first becomes known or subsequently changes.
+ *
+ * Gatoway core has no semantic understanding of what any entry means (AD-8 revised) -
+ * only which physical position a fixed label (`"B1"`, `"D1"`, ...) maps to (via the
+ * latest `device_capacity` report) and which connection's content is currently
+ * displayed. Labels are derived from `device_capacity`'s position-list index
+ * (`buttonPositions[i]` -> `"B" + (i+1)`, `dialPositions[i]` -> `"D" + (i+1)`) - never
+ * from live placement, which is what v1.6's superseded ordinal-index model conflated
+ * (QA-020).
  */
 export class ProfileRouter implements ProtocolRouter {
   private readonly manager: ConnectionManager;
   private readonly focusTracker: FocusTracker;
-  private readonly layoutResolver: LayoutResolver;
   private readonly logger: Logger;
+
+  /**
+   * The Stream Deck plugin's most recent `device_capacity` report (design.md D1).
+   * `null` means no report has ever been received yet - distinct from a report whose
+   * position lists are themselves empty (a known "zero of this control type," e.g. the
+   * device disconnected - design.md D2, amended v1.8 for QA-021). Never confuse the two:
+   * `getSlotCapacity()` must report `null` counts (unknown), not `0` counts (known
+   * zero), while this is still `null`.
+   */
+  private latestCapacity: DeviceCapacityPayload | null = null;
 
   constructor(options: ProfileRouterOptions) {
     this.manager = options.manager;
     this.focusTracker = options.focusTracker;
-    this.layoutResolver = options.layoutResolver;
     this.logger = options.logger;
   }
 
   /**
-   * Sends the current focus state's render sweep to a newly-(re)registered connection,
-   * if it's the Stream Deck display connection (tasks.md 3.4/3.5's initial case: the
-   * display connects while focus is still at its default of "none").
+   * Handles a (re-)registration (tasks.md 3.4/4.1/5.5): the Stream Deck plugin gets its
+   * current focus render sweep; any other (application) connection gets its initial
+   * `slot_capacity`, plus an immediate re-render if it is already the focused connection
+   * (design.md D3/D5.5 - re-registration while focused is the only content-update
+   * mechanism, so it must trigger the same immediate re-render `capability_update` used
+   * to).
    */
   handleRegistered(connection: ConnectionRecord): void {
-    if (connection.pluginType !== STREAM_DECK_PLUGIN_TYPE) {
+    if (connection.pluginType === STREAM_DECK_PLUGIN_TYPE) {
+      this.sendSweepTo(connection, this.focusTracker.current);
       return;
     }
-    this.sendSweepTo(connection, this.focusTracker.current);
+
+    this.sendSlotCapacity(connection);
+    if (this.focusTracker.current === connection.id) {
+      this.rerenderFocusedConnection(connection.id);
+    }
   }
 
   handleFocus(connection: ConnectionRecord, payload: FocusPayload): void {
@@ -72,6 +102,12 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
     this.broadcastForFocusChange(event.focusedConnectionId);
+    if (event.focusedConnectionId) {
+      const focusedConnection = this.manager.get(event.focusedConnectionId);
+      if (focusedConnection) {
+        this.sendSlotCapacity(focusedConnection);
+      }
+    }
   }
 
   /** Called via `ConnectionManager.onDisconnect` (tasks.md 2.4), wired in `index.ts`. */
@@ -83,6 +119,76 @@ export class ProfileRouter implements ProtocolRouter {
     this.broadcastForFocusChange(event.focusedConnectionId);
   }
 
+  /**
+   * Handles a `device_capacity` report (design.md D1, tasks.md 3.4, amended v1.8 for
+   * QA-021): accepted only from the Stream Deck plugin's own connection; the latest
+   * report fully replaces the previous one (never merged, never persisted). Every
+   * accepted report - whether this is the first one ever received (capacity
+   * transitioning from unknown to known) or a later one (the device itself changed,
+   * per the Stream Deck plugin's own `device_capacity` sending rule) - broadcasts a
+   * fresh `slot_capacity` to every currently-connected application plugin, not just
+   * whichever connection happens to register or gain focus next.
+   */
+  handleDeviceCapacity(connection: ConnectionRecord, payload: DeviceCapacityPayload): void {
+    if (connection.pluginType !== STREAM_DECK_PLUGIN_TYPE) {
+      this.logger.warn(
+        {
+          event: "device_capacity_rejected",
+          connectionId: connection.id,
+          pluginType: connection.pluginType,
+        },
+        "ignoring device_capacity from a connection that did not register as pluginType 'stream-deck'",
+      );
+      return;
+    }
+
+    this.latestCapacity = {
+      buttonPositions: Array.isArray(payload?.buttonPositions) ? [...payload.buttonPositions] : [],
+      dialPositions: Array.isArray(payload?.dialPositions) ? [...payload.dialPositions] : [],
+    };
+    this.logger.info(
+      {
+        event: "device_capacity_updated",
+        connectionId: connection.id,
+        buttonSlots: this.latestCapacity.buttonPositions.length,
+        dialSlots: this.latestCapacity.dialPositions.length,
+      },
+      "stream deck plugin reported device capacity",
+    );
+    this.broadcastSlotCapacity();
+  }
+
+  /**
+   * Sends a fresh `slot_capacity` to every currently-connected application plugin
+   * (design.md D2, amended v1.8 for QA-021) - every authenticated connection with a
+   * `pluginType` other than the Stream Deck plugin's own. Called whenever
+   * `device_capacity` is accepted, covering both "capacity just became known for the
+   * first time" and "the device itself changed" (the Stream Deck plugin only ever
+   * re-sends `device_capacity` on a genuine device change, so every accepted report
+   * here already represents one of those two cases).
+   */
+  private broadcastSlotCapacity(): void {
+    for (const connection of this.manager.list()) {
+      if (
+        connection.state === "authenticated" &&
+        connection.pluginType !== undefined &&
+        connection.pluginType !== STREAM_DECK_PLUGIN_TYPE
+      ) {
+        this.sendSlotCapacity(connection);
+      }
+    }
+  }
+
+  /**
+   * Resolves an `input_event` (design.md D6, amended v1.7 for QA-020): maps its
+   * reported physical position to its fixed label via the latest `device_capacity`
+   * report for the matching controller type (`buttonPositions[i]` -> `"B" + (i+1)`,
+   * `dialPositions[i]` -> `"D" + (i+1)`), then checks whether the focused connection's
+   * own declared `content` map has an entry for that label. Safely logs and drops at
+   * every unresolvable step - no connection focused, position not in the latest
+   * capacity report, or the focused connection's content has no entry for that label
+   * (underflow) - never errors or crashes (profile-routing spec).
+   */
   handleInputEvent(connection: ConnectionRecord, payload: InputEventPayload): void {
     const focusedId = this.focusTracker.current;
     if (!focusedId) {
@@ -115,49 +221,39 @@ export class ProfileRouter implements ProtocolRouter {
       return;
     }
 
-    // persisted-layout-config design.md D1: resolution is keyed by plugin type (the
-    // stable identity across reconnects), not connection id.
-    const capabilityId = this.layoutResolver.resolve(
-      focusedConnection.pluginType ?? "",
-      payload.controller,
-      payload.position,
-    );
-    if (!capabilityId) {
+    const positions = this.positionsFor(payload.controller);
+    const index = positions.findIndex((position) => samePosition(position, payload.position));
+    if (index === -1) {
       this.logger.info(
         {
           event: "input_event_ignored",
-          reason: "no_binding",
+          reason: "position_not_in_device_capacity",
           focusedConnectionId: focusedId,
           controller: payload.controller,
           position: payload.position,
         },
-        "ignoring input_event: focused connection has no capability bound at this position",
+        "ignoring input_event: reported position is not part of the current device capacity",
       );
       return;
     }
 
-    // design.md D3 (amended): the layout only binds a capability *id* to this position
-    // - the live capability itself must actually be among the focused connection's own
-    // declared capabilities. A stale/unknown id here is treated exactly like an
-    // unresolved binding, never a crash (profile-routing spec).
-    const capability = findCapability(focusedConnection, capabilityId);
-    if (!capability) {
+    const label = this.labelFor(payload.controller, index);
+    const content = focusedConnection.content ?? {};
+    if (!content[label]) {
       this.logger.info(
         {
           event: "input_event_ignored",
-          reason: "bound_capability_undeclared",
+          reason: "no_content_at_label",
           focusedConnectionId: focusedId,
-          capabilityId,
-          controller: payload.controller,
-          position: payload.position,
+          label,
         },
-        "ignoring input_event: focused connection has not declared the capability bound at this position",
+        "ignoring input_event: focused connection has no declared content at this label",
       );
       return;
     }
 
     const commandPayload: CommandPayload = {
-      capabilityId: capability.id,
+      label,
       eventType: payload.eventType,
       delta: payload.delta,
     };
@@ -168,122 +264,54 @@ export class ProfileRouter implements ProtocolRouter {
     });
   }
 
+  private positionsFor(controller: Controller): Position[] {
+    if (!this.latestCapacity) {
+      return [];
+    }
+    return controller === "keypad"
+      ? this.latestCapacity.buttonPositions
+      : this.latestCapacity.dialPositions;
+  }
+
   /**
-   * Handles an incoming `capability_update` (design.md D7, task-group-7 addendum): a
-   * connection pushing a live display change to one of its own already-declared
-   * capabilities. Looks the target capability up within the *sender's own* connection
-   * record only - an app can never update another connection's capabilities - sparse-
-   * merges whatever fields were provided into the stored record, and, if the sender is
-   * currently focused and the capability is bound to a position, immediately re-renders
-   * that position rather than waiting for the next `input_event` or focus change.
+   * Derives a physical position's fixed label from its controller type and 0-based
+   * index within the latest `device_capacity` report (design.md D1/D6, amended v1.7 for
+   * QA-020): `"B" + (index + 1)` for a button, `"D" + (index + 1)` for a dial. The
+   * inverse of `slotContentValidation.ts`'s `parseLabel`.
    */
-  handleCapabilityUpdate(connection: ConnectionRecord, payload: CapabilityUpdatePayload): void {
-    const capabilityId = payload?.capabilityId;
-    const capability = findCapability(connection, capabilityId);
-    if (!capability) {
-      this.logger.info(
-        {
-          event: "capability_update_ignored",
-          reason: "undeclared_capability",
-          connectionId: connection.id,
-          capabilityId,
-        },
-        "ignoring capability_update: capability id is not among this connection's own declared capabilities",
-      );
-      return;
-    }
+  private labelFor(controller: Controller, index: number): string {
+    return (controller === "keypad" ? "B" : "D") + (index + 1);
+  }
 
-    // validate-capability-payloads design.md D1/D2: each field is validated
-    // independently; a field that fails validation is not applied (the stored value
-    // for that field is left unchanged, exactly as if the field had been omitted),
-    // while any other, validly-typed fields in the same message still apply.
-    const validation = validateCapabilityUpdateFields(payload);
-    const rejectedFields: { field: string; reason: string }[] = [];
-    const appliedFields: string[] = [];
+  /**
+   * Returns the current button/dial slot counts, per `ProtocolRouter.getSlotCapacity`
+   * (amended v1.8 for QA-021): `null` for both if no `device_capacity` report has ever
+   * been received - never `0`, which would mean a genuinely known-empty device.
+   */
+  getSlotCapacity(): SlotCapacityPayload {
+    if (!this.latestCapacity) {
+      return { buttonSlots: null, dialSlots: null };
+    }
+    return {
+      buttonSlots: this.latestCapacity.buttonPositions.length,
+      dialSlots: this.latestCapacity.dialPositions.length,
+    };
+  }
 
-    if (validation.icon) {
-      if (validation.icon.ok) {
-        // `null` is an explicit reset to "no icon" on the stored record (mirrors
-        // render_update's manifest-default-reset semantics); omitted means unchanged.
-        capability.icon = validation.icon.value === null ? undefined : validation.icon.value;
-        appliedFields.push("icon");
-      } else {
-        rejectedFields.push({ field: "icon", reason: validation.icon.reason });
-      }
-    }
-    if (validation.label) {
-      if (validation.label.ok) {
-        capability.label = validation.label.value;
-        appliedFields.push("label");
-      } else {
-        rejectedFields.push({ field: "label", reason: validation.label.reason });
-      }
-    }
-    if (validation.state) {
-      if (validation.state.ok) {
-        capability.state = validation.state.value;
-        appliedFields.push("state");
-      } else {
-        rejectedFields.push({ field: "state", reason: validation.state.reason });
-      }
-    }
+  private sendSlotCapacity(connection: ConnectionRecord): void {
+    sendMessage(connection, this.logger, {
+      type: "slot_capacity",
+      connectionId: connection.id,
+      payload: this.getSlotCapacity(),
+    });
+  }
 
-    if (rejectedFields.length > 0) {
-      sendError(
-        connection,
-        this.logger,
-        "one or more capability_update fields were invalid and were not applied",
-        { rejectedFields },
-      );
-    }
-
-    // QA-016 fix: this log line predates per-field validation and used to be
-    // unconditionally accurate (every present field was always applied). Now that a
-    // field can be rejected, only claim something was "applied" when at least one field
-    // actually was - if every present field failed validation (or none were present),
-    // log a distinct, accurate event instead of falsely claiming the stored record
-    // changed.
-    if (appliedFields.length > 0) {
-      this.logger.info(
-        { event: "capability_updated", connectionId: connection.id, capabilityId, appliedFields },
-        "applied live capability_update to stored capability record",
-      );
-    } else {
-      this.logger.info(
-        { event: "capability_update_not_applied", connectionId: connection.id, capabilityId, rejectedFields },
-        "capability_update applied no fields to stored capability record",
-      );
-    }
-
-    if (this.focusTracker.current !== connection.id) {
-      // Stored, but this connection's layout isn't currently displayed (profile-routing
-      // spec: "Update while not focused produces no render").
-      return;
-    }
-
+  private rerenderFocusedConnection(focusedConnectionId: string): void {
     const streamDeckConnection = this.findStreamDeckConnection();
     if (!streamDeckConnection) {
       return;
     }
-
-    for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const boundCapabilityId = this.layoutResolver.resolve(connection.pluginType ?? "", controller, position);
-      if (boundCapabilityId !== capabilityId) {
-        continue;
-      }
-      this.sendRenderUpdate(streamDeckConnection, {
-        controller,
-        position,
-        // QA-010 fix: same reasoning as sendBoundLayoutSweep above - this re-render is a
-        // full, authoritative statement of the capability's current display, so an
-        // explicit icon:null reset (including one requested via capability_update, which
-        // stores it as `undefined` - see the icon-merge above) must survive as `null` on
-        // the wire, not collapse into "omitted" (= "leave unchanged").
-        icon: capability.icon ?? null,
-        label: capability.label,
-        state: capability.state,
-      });
-    }
+    this.sendBoundContentSweep(streamDeckConnection, focusedConnectionId);
   }
 
   private broadcastForFocusChange(focusedConnectionId: string | null): void {
@@ -301,74 +329,71 @@ export class ProfileRouter implements ProtocolRouter {
     focusedConnectionId: string | null,
   ): void {
     if (focusedConnectionId) {
-      this.sendBoundLayoutSweep(streamDeckConnection, focusedConnectionId);
+      this.sendBoundContentSweep(streamDeckConnection, focusedConnectionId);
     } else {
       this.sendIdleSweep(streamDeckConnection);
     }
   }
 
-  private sendBoundLayoutSweep(
+  /**
+   * Renders the focused connection's declared content (design.md D6, amended v1.7 for
+   * QA-020): for each physical position, derives its fixed label and looks it up
+   * directly in the focused connection's `content` map. Any physical position whose
+   * label is absent from that map is swept to the idle appearance - mirroring the old
+   * array-underflow idle sweep, just driven by map-key presence instead of array length.
+   */
+  private sendBoundContentSweep(
     streamDeckConnection: ConnectionRecord,
     focusedConnectionId: string,
   ): void {
     const focusedConnection = this.manager.get(focusedConnectionId);
-    for (const { controller, position } of this.layoutResolver.allPositions()) {
-      const capabilityId = this.layoutResolver.resolve(
-        focusedConnection?.pluginType ?? "",
-        controller,
-        position,
-      );
-      if (!capabilityId) {
-        continue;
-      }
-      // design.md D3 (amended): render the *live* capability from the connection's own
-      // declared capabilities, not a static snapshot embedded in the layout resolver -
-      // this is what actually makes capability_update (D7) able to change what renders.
-      const capability = findCapability(focusedConnection, capabilityId);
-      if (!capability) {
-        this.logger.info(
-          {
-            event: "bound_capability_undeclared",
-            focusedConnectionId,
-            capabilityId,
+    const content = focusedConnection?.content ?? {};
+    this.sendContentSweepForController(streamDeckConnection, "keypad", content);
+    this.sendContentSweepForController(streamDeckConnection, "encoder", content);
+  }
+
+  private sendContentSweepForController(
+    streamDeckConnection: ConnectionRecord,
+    controller: Controller,
+    content: RegisterContent,
+  ): void {
+    const positions = this.positionsFor(controller);
+    positions.forEach((position, index) => {
+      const label = this.labelFor(controller, index);
+      const entry = content[label];
+      const payload: RenderUpdatePayload = entry
+        ? {
             controller,
             position,
-          },
-          "layout resolver bound a capability id the focused connection has not declared; skipping render for this position",
-        );
-        continue;
-      }
-      const payload: RenderUpdatePayload = {
-        controller,
-        position,
-        // QA-010 fix: this sweep is always a full, authoritative statement of "what does
-        // this position look like right now" for the newly-focused connection - never a
-        // partial delta - so an unset `capability.icon` must be asserted as an explicit
-        // `null` (reset to manifest default), not omitted. Omitting it here would be
-        // indistinguishable, once JSON-serialized, from "leave unchanged", which would
-        // leave a previously-focused connection's icon visually stuck.
-        icon: capability.icon ?? null,
-        label: capability.label,
-        state: capability.state,
-      };
+            // This sweep is always a full, authoritative statement of "what does this
+            // position look like right now" - never a partial delta - so an unset
+            // `entry.icon` must be asserted as an explicit `null` (reset to manifest
+            // default), not omitted (QA-010's original reasoning, carried forward).
+            icon: entry.icon ?? null,
+            label: entry.label,
+            state: entry.state,
+          }
+        : { controller, position, icon: null, label: IDLE_LABEL, state: 0 };
       this.sendRenderUpdate(streamDeckConnection, payload);
-    }
+    });
   }
 
   private sendIdleSweep(streamDeckConnection: ConnectionRecord): void {
-    for (const { controller, position } of this.layoutResolver.allPositions()) {
-      // design.md D4 (amended): explicitly reset `icon` to `null` rather than omitting
-      // it - an omitted field means "unchanged" (sparse-update semantics), so an idle
-      // sweep that never mentions `icon` would leave a previously-focused connection's
-      // capability icon visually stuck after focus clears.
-      const payload: RenderUpdatePayload = {
-        controller,
-        position,
-        icon: null,
-        label: IDLE_LABEL,
-        state: 0,
-      };
-      this.sendRenderUpdate(streamDeckConnection, payload);
+    for (const controller of ["keypad", "encoder"] as const) {
+      for (const position of this.positionsFor(controller)) {
+        // design.md D4 (amended): explicitly reset `icon` to `null` rather than
+        // omitting it - an omitted field means "unchanged" (sparse-update semantics),
+        // so an idle sweep that never mentions `icon` would leave a previously-focused
+        // connection's icon visually stuck after focus clears.
+        const payload: RenderUpdatePayload = {
+          controller,
+          position,
+          icon: null,
+          label: IDLE_LABEL,
+          state: 0,
+        };
+        this.sendRenderUpdate(streamDeckConnection, payload);
+      }
     }
   }
 

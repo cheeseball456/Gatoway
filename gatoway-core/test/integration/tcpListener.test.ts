@@ -78,7 +78,7 @@ describe("TCP listener (integration)", () => {
       encodeNdjsonLine(
         encodeMessage({
           type: "register",
-          payload: { pluginType: "lightroom", capabilities: [], token: "the-real-token" },
+          payload: { pluginType: "lightroom", token: "the-real-token" },
         }),
       ),
     );
@@ -104,7 +104,7 @@ describe("TCP listener (integration)", () => {
       encodeNdjsonLine(
         encodeMessage({
           type: "register",
-          payload: { pluginType: "lightroom", capabilities: [], token: "wrong-token" },
+          payload: { pluginType: "lightroom", token: "wrong-token" },
         }),
       ),
     );

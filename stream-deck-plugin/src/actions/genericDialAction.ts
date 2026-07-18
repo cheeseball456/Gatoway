@@ -13,9 +13,9 @@ import {
 } from "./genericDialRenderer.js";
 import { encoderPosition, positionsMatch } from "./protocolPositions.js";
 import type { RenderStore } from "./renderStore.js";
+import { GENERIC_DIAL_ACTION_UUID } from "./actionIds.js";
 
-/** Must match the `UUID` declared for this action in `manifest.json` (design.md D5). */
-export const GENERIC_DIAL_ACTION_UUID = "com.gatoway.streamdeck.dial";
+export { GENERIC_DIAL_ACTION_UUID };
 
 /**
  * Gatoway's generic, position-based Encoder (dial) action (AD-8, design.md D5). Forwards

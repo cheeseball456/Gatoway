@@ -1373,3 +1373,338 @@ New/extended coverage is thorough for the scope of this change: `allowedOriginsC
 **Recommendation:** ✅ **Pass** — No Critical, Major, Minor, or Question issues are open. The fix directly and correctly closes QA-017's gap (a real, persistent, GUI-launch-compatible source for `GATOWAY_ALLOWED_ORIGINS`), the delete-on-empty behavior in `buildCoreChildEnv()` is confirmed correct and inert with respect to `gatoway-core`'s own parsing and the separate standalone-`gatoway-core` `/verify` code path, logging and schema validation are both faithful to established project conventions and genuinely strict, the optional-logger default cannot swallow a real error, and both workspaces' full test suites (155 + 86 = 241 tests) and typechecks pass under direct re-verification. Ready for `/verify` (in particular, `tasks.md` 4.2's still-outstanding manual Firefox-through-the-real-Stream-Deck-app check) and, following that, `doc-writer` and `/opsx:archive`.
 
 ---
+
+# Static Review Session — 2026-07-16 — `extension-provided-slot-content`
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the OpenSpec change `extension-provided-slot-content` (branch `extension-provided-slot-content`, HEAD `bb12e4d`) — the QA-018 resolution: replaces the persisted `layout.json`/capability-id model with a live, ordinal-position-based model (`device_capacity`/`slot_capacity`, `register`'s `content`, ordinal `command.slotIndex`), and removes `persisted-layout-config`'s entire deliverable in the same step. Reviewed `proposal.md`, `design.md` (D1-D7), all four spec deltas (`message-protocol`, `profile-routing`, `stream-deck-core-lifecycle`, `layout-persistence` — a full REMOVAL delta), `tasks.md`, `REQUIREMENTS.md` v1.2 (FR-007/FR-008), and `ARCHITECTURE.md` v1.6 (AD-6/AD-8 revised, AD-9 added), against the implementation in both workspaces.
+**Prepared for:** Technical Architect
+
+---
+
+## Summary
+
+This is a clean, well-executed implementation of a genuinely large, cross-cutting change, and every specifically-flagged risk area checks out under direct code inspection and test execution — not just by trusting the developer's report. `profileRouter.ts`'s resolution logic implements all five steps of D6's algorithm correctly (position → ordinal index via `device_capacity`, underflow drop, no-focus drop, `render_update` derivation from declared content + capacity, and an idle sweep that genuinely spans the full `device_capacity` report rather than any stale profile data). The removal of `persisted-layout-config` is complete, not partial: a full-tree grep and `git diff --stat` both confirm `layoutConfig.ts`, `layoutStore.ts`, `layoutResolver.ts`, `configLayoutResolver.ts`, `capabilityLookup.ts`, their tests, `GATOWAY_LAYOUT_FILE`, and `docs/LAYOUT_CONFIG.md` are all gone, with no stale import or dead reference anywhere in either package's source or test tree (the only surviving mentions are explicitly historical/explanatory, in `ARCHITECTURE.md`'s R-6 record and `gatoway-core/README.md`'s "no layout config file" section, both of which correctly describe the removal in the past tense rather than implying the files still exist). `device_capacity` is genuinely restricted to the `pluginType: "stream-deck"` connection with no special auth bypass — that connection authenticates via the exact same TCP-token/WS-Origin path as any other connection; `pluginType` is simply a self-declared string checked at the routing layer, mirroring the pre-existing pattern already used for `render_update` targeting. `state` on a dial (`content.dials`) entry is genuinely rejected by `validateSlotContent()` (checked before the type check, so no code path lets a numeric `state` slip through on an encoder entry), and the renamed `rejectedContent: [{ controller, index, reason }]` error shape is asserted verbatim in `messageHandler.test.ts` against design.md's exact shape. The deterministic device-capacity ordering claim (row-then-column for keys, ascending index for dials) is genuinely implemented via `Array.prototype.sort()` with an explicit comparator in `deviceCapacity.ts`, and is tested by feeding the computation function's actions in deliberately shuffled order and asserting the sorted output — a real determinism proof, not just a comment's assertion. Re-registration re-render behavior is implemented and tested exactly as design.md D3/D5.5 describe: a focused connection's re-`register` triggers an immediate `render_update` sweep; a non-focused connection's re-`register` stores the new content silently. The 72×72px/144×144px (@2x) icon guidance in `docs/PROTOCOL.md` is genuinely traceable to `@elgato/schemas`' own bundled manifest schema (confirmed directly in `node_modules/@elgato/schemas/streamdeck/plugins/manifest.json`, appearing identically across the key-state, multi-action, and dial/encoder icon fields), not merely asserted. Both workspaces' full test suites and typechecks were re-run directly rather than trusted from the developer's report: `gatoway-core` **114/114** tests passing, `stream-deck-plugin` **99/99** tests passing, both `tsc --noEmit` clean — matching the reported counts exactly.
+
+The one gap this review surfaced (QA-019, Minor) is a testing-coverage accuracy issue, not a functional defect found by tracing the code: `tasks.md` 8.5 claims a test exists confirming "overflow (more declared content than capacity) never causes an out-of-range render," but no test anywhere in either test file that exercises `ProfileRouter` (`profileRouter.test.ts`, `focusProfileRouting.integration.test.ts`) ever configures a `device_capacity` report with more than one button position and one dial position — every single test in both files uses the same fixed one-button/one-dial fixture. The resolution and render-sweep code appears correct by inspection regardless of capacity size (both are bounded by iterating `device_capacity`'s own position list), but the specific overflow scenario, and any scenario mixing populated and idle slots within one multi-position sweep, is asserted only by static code trace in this review, not by the automated suite — an under-tested claim in the same spirit as the historical QA-008 finding (a claimed test that doesn't exist).
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-019 | Minor | `openspec/changes/extension-provided-slot-content/tasks.md:54`, `gatoway-core/test/unit/profileRouter.test.ts`, `gatoway-core/test/integration/focusProfileRouting.integration.test.ts` | Task 8.5 claims a test confirms declared content longer than device capacity ("overflow") never causes an out-of-range render, but no test in either file ever configures a `device_capacity` with more than one button/one dial position — the overflow and multi-slot-mixed-sweep scenarios are untested, though the code appears correct by inspection. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+
+---
+
+## Issue Detail
+
+### QA-019 · Minor · `gatoway-core/test/unit/profileRouter.test.ts`, `gatoway-core/test/integration/focusProfileRouting.integration.test.ts`
+
+**What:** Every single test that exercises `ProfileRouter`'s resolution or rendering logic — across both `profileRouter.test.ts` (unit) and `focusProfileRouting.integration.test.ts` (integration) — uses the exact same fixed `device_capacity` fixture: exactly one button position (`{ row: 0, column: 0 }`) and one dial position (`{ index: 0 }`). No test anywhere configures a device capacity with more than one position of either kind, and no test declares `content.buttons`/`content.dials` longer than the reported capacity.
+
+**Scenario:** `tasks.md` 8.5 is checked off as complete and explicitly claims: "Unit + integration tests for resolution: ordinal index resolved correctly; underflow (input event's index has no content entry) safely dropped; position not in `device_capacity` safely dropped; **overflow (more declared content than capacity) never causes an out-of-range render**." The underflow and "position not found" cases are genuinely tested (e.g. `profileRouter.test.ts`'s "ignores an input_event whose position is not in the latest device_capacity report" and "...content has no entry at that ordinal index (underflow)"), but the overflow case this same task line claims is tested does not appear anywhere.
+
+**Evidence:**
+```
+$ grep -n "overflow" gatoway-core/test/unit/profileRouter.test.ts gatoway-core/test/integration/focusProfileRouting.integration.test.ts
+(no matches)
+
+$ grep -n "buttonPositions:\s*\[" gatoway-core/test/unit/profileRouter.test.ts gatoway-core/test/integration/focusProfileRouting.integration.test.ts
+gatoway-core/test/unit/profileRouter.test.ts:18:  buttonPositions: [{ row: 0, column: 0 }],
+gatoway-core/test/integration/focusProfileRouting.integration.test.ts:19:  buttonPositions: [{ row: 0, column: 0 }],
+```
+Both files share the same one-position-per-controller fixture (`DEVICE_CAPACITY`) throughout every test case. Tracing `sendContentSweepForController()` (`profileRouter.ts:309-332`) directly: it iterates `positions.forEach((position, index) => …)`, where `positions` comes from the latest `device_capacity` report — any `entries` (declared content) beyond `positions.length` are never visited by this loop, so an overflow can't cause an out-of-range render by construction. Similarly, `handleInputEvent`'s `slotIndex` is derived from `positions.findIndex(...)`, which is inherently bounded to `[0, positions.length)`, so it can never index past a `content` array's actual bounds in a way that would be unsafe. The implementation is very likely correct, but this was established by this review's own code trace, not by exercising it in the test suite as `tasks.md` claims.
+
+**Impact:** Low — the code appears correct by inspection, and both bounding loops make an out-of-range access structurally difficult to introduce even by future error. The impact is on trust in the task list's own completeness claim (the same category of issue as the historical QA-008 finding): a future change touching `sendContentSweepForController`, `handleInputEvent`, or the ordinal-index math could regress the overflow-safety property with no test catching it, and no reviewer would learn that from running the suite.
+
+**Suggested fix direction:** Add at least one test (unit is sufficient) that configures a `device_capacity` with N positions for a controller and a focused connection's `content` with more than N entries for that same controller, asserting exactly N `render_update`s are sent (no out-of-range access, no extra sends) and that an `input_event` for a position at the edge of capacity resolves normally. A second test with a device capacity of more than one position, where only some ordinal indices have declared content, would also directly exercise the "mixed sweep" case the idle-sweep-spans-full-capacity behavior implies but that the current single-position fixture can't distinguish from the "no content at all" case.
+
+---
+
+## Observations
+
+- `gatoway-core/src/routing/profileRouter.ts`'s `handleDeviceCapacity` restricts acceptance to `connection.pluginType === STREAM_DECK_PLUGIN_TYPE`, but `pluginType` is simply a self-declared string checked at the routing layer — any connection that passes the ordinary TCP-token or WS-Origin authentication (there is no additional per-`pluginType` credential) could declare `pluginType: "stream-deck"` at `register` time and then send a spoofed `device_capacity` report, or have its own `render_update`s targeted at it via `findStreamDeckConnection()`'s identical pattern. This is not a new weakness introduced by this change — it is the same pre-existing precedent `render_update` targeting has always used — and the review brief's specific ask ("no special bypass — should still go through the same auth as any other connection") is satisfied: there is no special bypass. Flagged only as a pre-existing, unchanged architectural property worth the architect's awareness, not a regression.
+- `openspec/specs/message-protocol/spec.md` and `openspec/specs/profile-routing/spec.md` (the consolidated, already-archived specs) still describe the old `capability_update`/`capabilityId` model in full. This is expected, not a defect: those files are only updated by `/opsx:archive`, which has not yet been run for this change — the delta specs under `openspec/changes/extension-provided-slot-content/specs/` are the correct, current source of truth pre-archive. Noted so the architect doesn't mistake this for a missed rewrite; it will resolve itself once this change is archived.
+- `docs/PROTOCOL.md`'s icon guidance attributes the 72×72/144×144 sizing to "`@elgato/schemas`' own `States[].Image` schema entry" — the exact schema path in the installed package is actually the manifest's per-state `Image` field (and, separately, the dial/encoder icon field, both independently confirmed at the identical dimensions) rather than a single unified `States[].Image` node; a cosmetic imprecision in how the source is cited, not in the numbers themselves, which are correct.
+
+---
+
+## Testing Coverage Assessment
+
+Coverage for this change is thorough and, with the one exception noted in QA-019, directly exercises every behavior this review was asked to scrutinise: the `SlotContent` validator (valid/invalid `label`/`icon`/`state`, including the dial-state rejection) is unit-tested exhaustively in `slotContentValidation.test.ts`; registration handling (partial-entry rejection + follow-up `error`, full replace, omission-preserves-prior) is covered in `messageHandler.test.ts`; `device_capacity` acceptance/rejection by `pluginType` is covered in both `messageHandler.test.ts` (dispatch) and `profileRouter.test.ts` (the actual accept/reject decision); `slot_capacity` delivery (post-`register_ack`, on focus gain, zero-default) is covered in `profileRouter.test.ts`; the D6 resolution algorithm's four safely-dropped cases (no focus, position not in capacity, underflow, focused-connection-missing race) and its two successful-resolution cases (button, dial with `delta`) are all directly tested; re-registration-while-focused/not-focused re-render behavior is tested with an explicit before/after content comparison; and the Stream Deck plugin's `computeDeviceCapacity()` ordering is proven deterministic against shuffled input order in `deviceCapacity.test.ts`. The one gap (overflow / multi-position mixed sweep, QA-019) is the only scenario from this review's eight focus areas not directly exercised by an automated test; every other claim in the review brief was independently confirmed by direct code trace, not merely by re-reading the developer's report.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ⚠️ **Conditional pass** — No Critical or Major issues were found; every specifically-flagged risk area (D6's five-step algorithm, complete removal of `persisted-layout-config`, `device_capacity`'s sender restriction and lack of auth bypass, dial-state validation and the `rejectedContent` error shape, deterministic device-capacity ordering, re-registration re-render behavior, the icon pixel-dimension claim, and both workspaces' test/typecheck results) was independently verified against the actual code and a direct re-run of the test suites, not taken on trust. The single open finding (QA-019, Minor) is a testing-coverage completeness gap — the code is very likely correct by inspection, but the specific "overflow never causes an out-of-range render" claim in `tasks.md` 8.5 is not actually backed by a test, and no test in the suite ever uses a device capacity of more than one position per controller. The architect may choose to have the developer add the two suggested tests before archiving, or accept the risk and defer it — this does not block `/verify`, since it does not represent a known-broken behavior, only an unverified one.
+
+---
+
+# Interactive Verification Session (`/verify`) — 2026-07-16 — `extension-provided-slot-content`
+
+**Reviewer:** QA Engineer (interactive, with user)
+**Scope:** Live hardware verification of `extension-provided-slot-content` (branch `extension-provided-slot-content`, HEAD `a60caed` at time of this session). QA-019 had already been fixed and re-verified via automated tests before this session began.
+
+## Blocking finding: plugin crash-loops unconditionally on every startup
+
+**What:** The freshly-built Stream Deck plugin was relaunched via the real Stream Deck application (after killing a stale standalone `gatoway-core` instance left over from an earlier session and doing a clean `npm run build` on this branch). With a real profile active (3 generic Key actions + 1 generic Dial action placed, showing "Gatoway"/"Dial" — stale content from a prior run, since nothing new had rendered), no `com.gatoway.streamdeck` or `gatoway-core` process ever appeared in `ps aux`, despite repeated checks over ~15 seconds.
+
+**Scenario:** The plugin bundle's own SDK-generated logs (`stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/logs/`) showed 10 crash log files within the span of one minute (`com.gatoway.streamdeck.0.log` through `.9.log`, timestamps 10:00–10:01), each ending in the same uncaught exception — the plugin process crashes immediately on every single startup attempt, and Elgato's own Stream Deck application keeps restarting it in a tight loop, which is why no live process was ever caught by `ps aux`.
+
+**Evidence:**
+```
+Error: [ERR_NOT_SUPPORTED]: onDeviceDidChange requires Stream Deck version 7.0 or higher; please update the "Software.MinimumVersion" in the plugin's manifest to "7.0" or higher.
+    at requiresVersion (.../node_modules/@elgato/streamdeck/dist/plugin/validation.js:34:15)
+    at DeviceService.onDeviceDidChange (.../node_modules/@elgato/streamdeck/dist/plugin/devices/service.js:40:9)
+    at <anonymous> (stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/src/plugin.ts:74:20)
+```
+`stream-deck-plugin/com.gatoway.streamdeck.sdPlugin/manifest.json`'s `Software.MinimumVersion` is still `"6.5"` — task group 7's new `onDeviceDidChange` listener (added to detect live device connect/disconnect for `device_capacity` re-reporting, per design.md D1/task 7.3) requires SDK 7.0+, and the SDK's own runtime validation throws synchronously the moment this handler is registered, rather than merely warning. The manifest was never updated to match. The real, currently-installed Stream Deck application on this machine reports version `7.0.3` (confirmed via this session's own registration-info payload), so bumping the declared minimum is not just a workaround — it accurately reflects a real, already-satisfied requirement.
+
+**Impact:** Total, unconditional blocker — the Stream Deck plugin cannot start at all in its current state, on any device, regardless of any placed action or device_capacity scenario. This blocks 100% of live verification for this change, not just the device-capacity-specific behaviors.
+
+**Root-cause level:** Code (a manifest field that should have been updated alongside the SDK API it now depends on — not a design or requirements gap; design.md never specified a minimum SDK version, and this is purely a consequence of which SDK method the implementation chose to use).
+
+**Suggested fix direction:** Update `manifest.json`'s `Software.MinimumVersion` to `"7.0"`.
+
+## Status
+
+**Recommendation:** ❌ **Requires fixes** — this is a Critical, code-level, unconditional blocker. Route to `developer` for the one-line manifest fix, then resume this `/verify` session to complete the live checks that couldn't even begin (device capacity detection/reporting, live focus/render/input round trip, re-registration re-render, overflow/underflow on real hardware).
+
+---
+
+## Resumed session (same day, after the manifest fix landed — commit `83cbcde`)
+
+Plugin confirmed no longer crash-looping; clean startup log; `device_capacity` correctly reported `{buttonPositions: [], dialPositions: []}` at registration, then updated ~5s later to the 3 buttons + 1 dial actually placed on the active profile. Connected the manual `testAppClient.ts` (fixture: 2 buttons + 1 dial, deliberately fewer than the device's 3 buttons, to exercise underflow): `slot_capacity` correctly reported `{buttonSlots: 3, dialSlots: 1}` at registration and again on focus-gain; on `focus: true`, the physical device rendered "Fixture A"/"Fixture B" on the first two buttons, the idle "Gatoway" label on the third (correct underflow behavior), and "Fixture Dial" on the dial — confirmed visually by the user against the real hardware, matching the logged `render_update`s exactly.
+
+### QA-020 (Major, root-cause: design) — `device_capacity` reports currently-placed actions, not the device's actual physical capacity
+
+**What:** `device_capacity` (`stream-deck-plugin/src/coreClient/deviceCapacity.ts`'s `computeDeviceCapacity()`) derives its position lists entirely from the Elgato SDK's `Device.actions` — i.e. only the generic Key/Dial actions the user has manually placed on the *currently active profile* right now. It never surfaces the device's actual hardware capacity (`Device.size` — raw key grid dimensions — or `Device.type`, which implies a fixed dial count per model) to Gatoway core or, in turn, to any application plugin.
+
+**Scenario:** The user, testing on a real Stream Deck+ (physically 8 keys + 4 dials), pointed out that different Stream Deck models have very different total physical capacities (e.g. a 32-key-only model; a 32-key + 8-dial model) and that an application plugin needs to know the device's actual capacity to plan a sensible, stable layout for that hardware — not just react to however many the user happens to have manually placed on the currently-active profile at any given moment. Today's `slot_capacity` (bare counts sent to app plugins) only ever reflects the latter.
+
+**Evidence:** `computeDeviceCapacity()`'s own docstring confirms this is by design: "Filters `Device.actions` down to just these two manifest ids... Only considers devices currently reported connected — matches 'currently holding a generic Key/Dial action.'" No code path anywhere in this change reads `Device.size`/`Device.type` at all. This matches `ARCHITECTURE.md` v1.6's AD-9 and `design.md`'s D1 exactly as written — the implementation is not wrong relative to what was designed.
+
+**Impact:** An application plugin currently has no way to distinguish "this device model physically only has 3 slots" from "this device model has 8 slots but the user has only placed 3 generic actions so far" — both look identical (`buttonSlots: 3`) from the plugin's point of view. A plugin trying to plan a stable layout suited to the actual hardware (e.g. "put my 4 most-used continuous parameters on this device's 4 dials") cannot do so reliably today.
+
+**Root-cause level:** Design. The requirement this serves (FR-007 — "Gatoway tells each plugin how many slots it has so the plugin can decide what to show") was captured correctly, but `AD-9`'s specific choice of *what number to report* may not fully satisfy the intent behind it once a plugin author needs to reason about the physical device shape, not just current placement. This is not a code defect — the code does exactly what `AD-9`/D1 specify — so it should not be patched ad hoc; it needs an architecture-level decision on whether `device_capacity`/`slot_capacity` should carry raw device capacity in addition to (or instead of) currently-placed count.
+
+**Suggested fix direction:** Not prescribing the exact mechanism — this needs a `/design-architecture` revisit to decide, e.g., whether to add the device's raw `size`/dial-count (derived from `Device.type`, which the SDK already exposes) as an additional field the Stream Deck plugin reports, and how a plugin should reconcile "physical capacity" against "currently placed" (since a physically-8-key device with only 3 keys currently placed still can't render more than 3 things, regardless of what the plugin is told the hardware supports).
+
+## Status (updated)
+
+**Recommendation:** ❌ **Requires fixes** — QA-020 is Major, design-level, and should not be patched in code without an architecture decision first. Live verification of everything else this session covered (crash fix, `device_capacity`/`slot_capacity` delivery and accuracy, underflow rendering) passed cleanly. Remaining live checks (physical key press → `command` resolution, re-registration re-render, overflow rendering, profile-switch capacity transitions) are paused pending resolution of QA-020, since the fix may change what data these checks need to exercise.
+
+---
+
+# Static Review Session — 2026-07-16 — `extension-provided-slot-content` (QA-020 rework: fixed-label addressing)
+
+**Reviewer:** QA Engineer
+**Scope:** Static review of the `ARCHITECTURE.md` v1.7 rework of `extension-provided-slot-content` (branch `extension-provided-slot-content`, HEAD `80dccfa`) — the QA-020 resolution: replaces v1.6's ordinal-index/placement-derived addressing with fixed, stable physical-position labels (`"B1"`, `"D1"`, ...) derived from the device's actual hardware capacity. Reviewed `design.md` in full (rewritten in place for v1.7, not appended), all three amended spec deltas (`message-protocol`, `profile-routing`, `stream-deck-core-lifecycle`), `tasks.md` §10 (this rework's actual scope — §1-9 are the already-reviewed, superseded v1.6 record), and the implementation in both workspaces. This session's focus areas were assigned explicitly: the `DeviceType`→dial-count mapping (verified independently against the installed `@elgato/schemas` package, not the developer's report), complete removal of placement-based (`willAppear`/`willDisappear`) detection, label-derivation symmetry between the two resolution directions, key-validation (not just value-validation) at registration, and a specific Observation the developer flagged about registration-time capacity-unknown behavior.
+**Prepared for:** Technical Architect
+
+---
+
+## Summary
+
+This rework is implemented correctly and precisely against the amended `design.md`, and every specifically-assigned focus area checks out under direct, independent verification rather than trust in the developer's report. The `DeviceType`→dial-count mapping in `stream-deck-plugin/src/coreClient/deviceCapacity.ts` was checked entry-by-entry against the actual doc comments on `@elgato/schemas`' `DeviceType` enum (`node_modules/@elgato/schemas/dist/streamdeck/plugins/index.d.ts:307-364`): all 14 enum members are present, every dial count (Stream Deck+ 4, Stream Deck Studio 2, Galleon 100 SD 2, Stream Deck+ XL 6, all eleven others 0) matches the SDK's own prose exactly, and `Device.size`'s doc comment ("Number of action slots, excluding dials / touchscreens") was independently confirmed too. `willAppear`/`willDisappear`-based placement detection is genuinely gone from `stream-deck-plugin/src/plugin.ts` — the diff (`git diff b1ed34c 80dccfa -- stream-deck-plugin/src/plugin.ts`) shows `streamDeck.actions.onWillAppear`/`onWillDisappear` calls removed outright, replaced by `onDeviceDidConnect`/`onDeviceDidDisconnect`/`onDeviceDidChange` as the only triggers for `device_capacity` recomputation; the `onWillAppear` methods still present on `GenericKeyAction`/`GenericDialAction` are a different, legitimate mechanism (per-instance idle-content rendering, unrelated to capacity detection) and correctly remain. Label derivation is symmetric by construction: `profileRouter.ts`'s `labelFor(controller, index)` is a single private method used both by `handleInputEvent`'s resolution direction and by `sendContentSweepForController`'s render direction, so the 1-based/0-based off-by-one risk this review was asked to rule out cannot occur — both directions literally call the same code. Key validation is genuinely implemented, not just value-shape validation: `slotContentValidation.ts`'s `validateSlotContentEntry` rejects an out-of-range label (`parsed.ordinal > slots`) before ever inspecting the value, and this is directly unit-tested (`"rejects a button label out of range for the current button capacity"`, `"...dial label..."`, `"rejects any label at all when the current capacity is zero"`). Both workspaces' full test suites and typechecks were re-run directly: `gatoway-core` **126/126** passing, `stream-deck-plugin` **102/102** passing, both `tsc --noEmit` clean.
+
+Two issues surfaced from this review's own independent tracing, not from the developer's report. **QA-021 (Major, design-level)** is the developer's own flagged Observation, which this review confirms is a real, practical risk rather than an academic edge case: a plugin that registers content before Gatoway core has ever received a `device_capacity` report has every single label rejected as out-of-range (capacity is `{0, 0}`), and — critically — nothing in the current design gives that plugin any subsequent signal to prompt it to re-register once real capacity becomes known, so its content can remain permanently empty. This is not confined to test-client ordering quirks; the token file any plugin authenticates with lives in a well-known, per-OS default location (`~/Library/Application Support/gatoway/token` on this machine) that any independently-reconnecting third-party plugin can read the moment it exists, with no ordering guarantee relative to the Stream Deck plugin's own registration. **QA-022 (Minor, code-level)**, found during this review's own probing of the key-validation logic beyond what the review brief asked for, is a genuine (if narrow) bug: `parseLabel`'s regex accepts non-canonical numeric forms (e.g. `"B01"`), which pass both key-range and value-shape validation and are accepted into a connection's `content` map under that literal, non-canonical string — but `profileRouter.ts`'s `labelFor()` only ever *produces* canonical labels (`"B1"`, never `"B01"`), so such an entry is accepted at registration (no `rejectedContent` error is raised) yet can never actually be resolved or rendered. I reproduced this directly against the running validator (see QA-022 detail below).
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-019 | Minor | `gatoway-core/test/unit/profileRouter.test.ts` | Overflow/mixed-sweep test coverage gap. | **Resolved** — re-verified in this session; the tests added in commit `a60caed` (`"overflow / multi-position mixed sweep (QA-019)"` describe block) were carried forward and correctly re-expressed against label-keyed content in this rework's task 10.7, and still pass. |
+| QA-021 | Major | `gatoway-core/src/connection/messageHandler.ts` (`handleRegister`/`resolveContent`), `gatoway-core/src/protocol/slotContentValidation.ts` | A plugin that registers before Gatoway core has ever received a `device_capacity` report has every declared label rejected as out-of-range (capacity is `{0,0}`), with no subsequent mechanism prompting it to re-register once real capacity becomes known — content can remain permanently empty. | Open |
+| QA-022 | Minor | `gatoway-core/src/protocol/slotContentValidation.ts:12,27-37` (`LABEL_PATTERN`/`parseLabel`) | A non-canonical numeric label (e.g. `"B01"`) passes both key-range and value validation and is silently accepted into `content`, but is never resolvable or renderable since `profileRouter.ts`'s `labelFor()` only ever produces canonical labels (`"B1"`) — an accepted entry that can never actually work, with no rejection reported. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved` — fixed and re-confirmed
+
+---
+
+## Issue Detail
+
+### QA-021 · Major (root-cause: design) · `gatoway-core/src/connection/messageHandler.ts`, `gatoway-core/src/protocol/slotContentValidation.ts`
+
+**What:** `handleRegister` computes the capacity to validate a `register` message's `content` against as `router?.getSlotCapacity() ?? { buttonSlots: 0, dialSlots: 0 }` — i.e., whatever `ProfileRouter` currently believes the device capacity to be *at the exact moment this specific `register` message is processed*. `ProfileRouter`'s internal `latestCapacity` starts at `{ buttonPositions: [], dialPositions: [] }` and is only ever updated by an actual `device_capacity` message from the Stream Deck plugin connection. There is no way to distinguish, from `getSlotCapacity()`'s return value alone, "no `device_capacity` has ever been received yet" from "a `device_capacity` was received and it genuinely reported a zero-slot device" — both produce `{ buttonSlots: 0, dialSlots: 0 }`. Since `validateSlotContentEntry` rejects any label whose ordinal exceeds the reported slot count (`parsed.ordinal > slots`), *every* label an application plugin could possibly declare (`"B1"`, `"D1"`, etc., all >= ordinal 1) is rejected outright when capacity is still at this initial zero state.
+
+**Scenario:** An application plugin's connection is authenticated and processes its `register` message before the Stream Deck plugin's own connection has completed its registration and sent its first `device_capacity` report (design.md D1 sends this once, at the Stream Deck plugin's own registration — there is no guarantee of *ordering* between two independent connections both racing to register against the same freshly-started Gatoway core process). This is not confined to the project's own manual test clients — those are explicitly documented (`testAppClient.ts`'s own header comment) to be run manually, well after Gatoway core and the Stream Deck plugin are already up, so they are very unlikely to hit this window in practice. The realistic risk is a genuine third-party application plugin (the next delivery-sequence item per `ARCHITECTURE.md`, and the explicit reason this project already has a `document-plugin-reconnection` capability for aggressive reconnect/retry behavior): the auth token any plugin needs lives at a well-known, fixed, per-OS default path (`gatoway-core/src/config.ts`'s `defaultConfigDir()`, e.g. `~/Library/Application Support/gatoway/token` on macOS) that is not exclusive to the Stream Deck plugin — any plugin polling for that file's existence in a reconnect loop can read it and race to register the instant Gatoway core's TCP/WS listener comes up, with no ordering relative to the Stream Deck plugin's own connect-and-register sequence.
+
+**Evidence:**
+```
+$ grep -n "rejects any label at all when the current capacity is zero" -A6 gatoway-core/test/unit/slotContentValidation.test.ts
+  it("rejects any label at all when the current capacity is zero", () => {
+    const result = validateSlotContentEntry(
+      "B1",
+      { label: "One" },
+      { buttonSlots: 0, dialSlots: 0 },
+    );
+    expect(result.ok).toBe(false);
+```
+This test confirms the behavior is deliberate and understood at the unit level — but no test anywhere in either workspace exercises the end-to-end consequence: an application connection registering with content while capacity is still unknown, receiving a `register_ack: {status: "ok"}` plus an `error` listing every one of its own labels as `"out of range for the current device capacity (0 button slot(s))"`, ending up with a fully empty stored `content`, and then never independently being told to re-declare once a real `device_capacity` report later arrives. `slot_capacity` (the only capacity-related message an application plugin receives) is sent only at that connection's *own* registration and on its *own* subsequent focus gain (design.md D2) — not broadcast to all other connections whenever the Stream Deck plugin's `device_capacity` changes — so a plugin that registered too early and is not the next one to gain focus has no signal at all that its content was silently discarded.
+
+**Impact:** For a real, independently-launched application plugin, this produces a failure mode that looks like nothing is wrong at the protocol level (registration succeeds, an `error` is sent but nothing distinguishes "some labels rejected, plugin still has other valid content" from "every single label rejected, plugin now has zero content") and is very difficult for a plugin author to diagnose or design around, since the correct recovery action (re-send `register` again, sometime later, on a guess) isn't prompted by anything Gatoway core sends. If the plugin never happens to gain focus again in a way that would make this visible, it could remain silently non-functional indefinitely.
+
+**Root-cause level:** Design. The code implements `design.md` D2/D4 exactly as specified — this is not an implementation bug. The design does not address how a plugin that loses this race is expected to recover, nor whether Gatoway core should distinguish "capacity not yet known" from "capacity known to be zero" for validation purposes. This needs an architecture-level decision, not a code-level patch.
+
+**Suggested fix direction:** Not prescribing the exact mechanism. Options worth the architect's consideration include: (a) deferring content-key validation until a real `device_capacity` report has been received at least once, treating "not yet known" permissively rather than rejecting every label; (b) documenting and requiring that application plugins re-send `register` upon any change they can detect via `slot_capacity`, and additionally broadcasting `slot_capacity` to *all* currently-registered application connections (not just the reporting/focusing one) whenever the Stream Deck plugin's `device_capacity` changes, so a plugin that lost the race gets an explicit signal to retry; or (c) some combination. The right choice affects both `design.md` and the `message-protocol`/`profile-routing` spec deltas, so it should go through `/design-architecture` rather than being patched ad hoc in `messageHandler.ts`.
+
+---
+
+### QA-022 · Minor · `gatoway-core/src/protocol/slotContentValidation.ts:12,27-37`
+
+**What:** `LABEL_PATTERN = /^([BD])(\d+)$/` accepts any run of digits after the `B`/`D` prefix, including non-canonical forms with leading zeros (e.g. `"B01"`, `"B007"`). `parseLabel` computes `ordinal = Number(match[2])`, so `"B01"` parses to `{ controller: "keypad", ordinal: 1 }` — structurally indistinguishable from `"B1"` for range-checking purposes — but the entry is stored in the connection's `content` map under the literal key `"B01"`, not the canonical `"B1"`.
+
+**Scenario:** An application plugin declares a label with a leading zero — plausible if a plugin author generates label strings programmatically with fixed-width zero-padding (e.g. `` `B${String(n).padStart(2, "0")}` `` for a device with more than 9 slots).
+
+**Evidence:** Reproduced directly against the actual validator:
+```
+$ npx tsx -e "
+import { parseLabel, validateSlotContentEntry } from './src/protocol/slotContentValidation.ts';
+console.log(parseLabel('B01'));
+console.log(validateSlotContentEntry('B01', { label: 'Test' }, { buttonSlots: 8, dialSlots: 4 }));
+"
+{ controller: 'keypad', ordinal: 1 }
+{ ok: true, content: { label: 'Test' } }
+```
+`validateSlotContentEntry` returns `ok: true` — no rejection, no `rejectedContent` entry — so the entry is stored as `content["B01"]`. `profileRouter.ts`'s `labelFor()` (the only place that ever *derives* a label to look up) always constructs canonical strings — `(controller === "keypad" ? "B" : "D") + (index + 1)` — which for index 0 produces `"B1"`, never `"B01"`. Both `handleInputEvent`'s `content[label]` lookup and `sendContentSweepForController`'s `content[label]` lookup use this same canonical form, so `content["B01"]` is never read by either — the entry is accepted at registration but functionally inert forever afterward.
+
+**Impact:** Low-likelihood but confusing when it occurs: a plugin author would see their `register` succeed with no rejection reported for this entry, reasonably conclude it is correctly registered, and then find it never renders on the device and never resolves an `input_event` — with no error message anywhere pointing at the actual cause (the entry effectively behaves as if it were never declared, but without the rejection signal that would normally accompany that).
+
+**Suggested fix direction:** Require the label's numeric portion to be in canonical form (i.e., `String(ordinal) === match[2]`, rejecting leading zeros) as part of `parseLabel`'s own validation, so a non-canonical label is reported via the existing `rejectedContent` mechanism rather than silently accepted and left permanently unreachable.
+
+**Root-cause level:** Code. `design.md` D1's labeling convention ("a `B`/`D` prefix plus a 1-based ordinal") implies canonical decimal form; the regex implementing it is looser than the convention it's meant to enforce.
+
+---
+
+## Observations
+
+- `stream-deck-plugin/src/coreClient/deviceCapacity.ts`'s `DIAL_COUNT_BY_DEVICE_TYPE` is typed as `Record<DeviceType, number>` against a numeric enum — TypeScript enforces this as exhaustive at compile time (a future `DeviceType` member added to `@elgato/schemas` without a corresponding entry here would fail `tsc`, not silently compile). This is actually a stronger guarantee than `design.md`'s own stated Risk ("if Elgato ships a new device type, this mapping will be silently wrong... until updated") describes — the `dialCountForDeviceType`'s `?? 0` fallback is consequently unreachable dead code today, not a real runtime gap. Not a defect; worth the architect's awareness only because `design.md`'s risk framing slightly overstates the actual exposure (a mismatch would be a build failure on the next SDK upgrade, not a silent one), which is more reassuring, not less.
+- `gatoway-core/README.md`, `stream-deck-plugin/README.md`, and `openspec/changes/extension-provided-slot-content/proposal.md`'s "Why"/"What Changes" narrative sections still describe superseded models — the READMEs describe the v1.6 ordinal/placement-derived model (and in places even the original pre-v1.6 `layout.json`/`Capability` model), and `proposal.md`'s narrative describes the original v1.6 story rather than v1.7's fixed-label model. This is explicitly out of this rework's scope per `tasks.md` §10's own framing (the developer flagged, but did not fix, these) — noted here only so the main agent routes them to `doc-writer` rather than mistaking the absence of a fix for an oversight. Not blocking.
+- `openspec/specs/message-protocol/spec.md` and `openspec/specs/profile-routing/spec.md` (the consolidated, already-archived specs) still describe the pre-this-change model in full — expected, since `/opsx:archive` has not yet run for this change; will resolve on archival, consistent with the same Observation carried forward from the prior (2026-07-16) static review session.
+
+---
+
+## Testing Coverage Assessment
+
+Coverage for this rework is thorough for everything this session was specifically asked to scrutinise: the `DeviceType`→dial-count mapping is tested per-model (Stream Deck+, Stream Deck Studio, Stream Deck+ XL, Galleon 100 SD, and a no-dial device type) in `deviceCapacity.test.ts`; the removal of placement-based detection is implicit in the diff itself (no test needed to prove an event listener's absence, but `deviceCapacity.test.ts`'s `"derives capacity purely from size/type regardless of what actions (if any) are placed"` test directly exercises the intended replacement behavior); label-derivation symmetry is exercised indirectly through `profileRouter.test.ts`'s resolution and render-sweep tests both using the same `device_capacity` fixtures; key-range validation is directly unit-tested in `slotContentValidation.test.ts` (in-range, out-of-range, and zero-capacity cases). Neither of this session's own two findings (QA-021, QA-022) is caught by the existing suite — QA-021 because no test exercises the specific "register before any device_capacity has arrived, then verify no recovery signal exists" end-to-end scenario, and QA-022 because no test feeds a non-canonical numeric label (e.g. `"B01"`) into `validateSlotContentEntry`/`parseLabel`. Both gaps are true blind spots, not just theoretical — QA-022 was reproduced directly against the running code above.
+
+Full suite and typecheck re-run directly in this session (not taken from the developer's report):
+- `gatoway-core`: `npm test` → **126/126 passing**, 16 test files. `npx tsc --noEmit -p tsconfig.json` → clean.
+- `stream-deck-plugin`: `npm test` → **102/102 passing**, 15 test files. `npx tsc --noEmit -p tsconfig.json` → clean.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ❌ **Requires fixes** — QA-021 is Major and design-level: it does not block on its own the specific live checks `/verify` was paused on for QA-020 (device capacity detection/reporting, focus/render/input round trip, re-registration re-render, overflow/underflow — none of which depend on the registration-timing race), but it represents a real, user-facing gap that should be resolved (via `/design-architecture`) before this change is archived, since the very next real application plugin this project builds is exactly the kind of independent process that could hit it. QA-022 is Minor and code-level; the architect may have the developer fix it in this cycle or defer it, at their discretion — it does not block `/verify`. QA-019 is confirmed resolved and carried through this rework's re-expressed tests. Both workspaces' full test suites and typechecks were independently re-run and are clean. The three Observations are non-blocking; the doc/spec staleness items should be routed to `doc-writer` once the change is otherwise ready to archive.
+
+---
+
+# Static Review Session — 2026-07-16 — `extension-provided-slot-content` (QA-021/QA-022 fix: unknown-vs-zero capacity, canonical label form)
+
+**Reviewer:** QA Engineer
+**Scope:** Re-verification of the `ARCHITECTURE.md` v1.8 amendment to `extension-provided-slot-content` (branch `extension-provided-slot-content`, HEAD `2cc6917`) — the fix for QA-021 (Major, design-level: registering before device capacity was known permanently rejected content, since "unknown" and "known zero" were both represented as `0`) and QA-022 (Minor, code-level: the label-key parser accepted non-canonical numeric forms like `"B01"`). Reviewed `design.md`'s D2, D4, and D9 sections (rewritten for this fix), the amended `specs/message-protocol/spec.md` delta, and the implementation in `gatoway-core/src/protocol/messages.ts`, `slotContentValidation.ts`, `connection/messageHandler.ts`, and `routing/profileRouter.ts`, tracing each claim directly against the code rather than trusting variable/function naming or the developer's report. `tasks.md` §11 (this fix's actual scope) is fully checked off.
+**Prepared for:** Technical Architect
+
+---
+
+## Summary
+
+This fix is implemented correctly and precisely against the amended `design.md`, and both QA-021 and QA-022 are genuinely resolved. `SlotCapacityPayload.buttonSlots`/`dialSlots` are now typed `number | null` in `gatoway-core/src/protocol/messages.ts`, and every construction site was traced: `profileRouter.ts`'s `getSlotCapacity()` returns `{ buttonSlots: null, dialSlots: null }` when `latestCapacity` has never been set, and only ever returns numeric (possibly genuinely-zero) counts once a real `device_capacity` report has arrived; `messageHandler.ts`'s `handleRegister` falls back to the same `{ buttonSlots: null, dialSlots: null }` shape when `router` itself is undefined (test-only code path). The broadcast logic (`ProfileRouter.broadcastSlotCapacity`, called from `handleDeviceCapacity`) was traced end to end: it iterates every connection via `manager.list()`, filters to `state === "authenticated"` and `pluginType !== undefined && pluginType !== STREAM_DECK_PLUGIN_TYPE`, and sends each one a fresh `slot_capacity` — confirmed genuinely multi-recipient, not single-connection, via `profileRouter.test.ts`'s "broadcasts a fresh slot_capacity to every already-connected application plugin" test, which registers two independent application connections (`test-app-a`, `test-app-b`) before the Stream Deck plugin ever reports capacity and asserts both receive the unsolicited broadcast; a second test confirms the broadcast fires again on a subsequent genuine device change, and a third confirms the Stream Deck connection itself and an unregistered connection are correctly excluded.
+
+The trickiest item — no retroactive re-validation (D9) — checks out under direct code tracing, not just trust in the design doc's stated intent: no code path anywhere (searched every call site touching a connection's stored `content`) revisits or drops an already-accepted entry once capacity becomes known; `handleDeviceCapacity` only ever calls `broadcastSlotCapacity()`, which sends messages but never reads or mutates any connection's `content`, and `ConnectionManager.setPluginInfo` (the only writer of `record.content`) is called exclusively from `handleRegister`, never from the capacity-change path. `focusProfileRouting.integration.test.ts`'s "accepts a canonically-formed but potentially out-of-range label while capacity is unknown, broadcasts fresh slot_capacity once known, and never retroactively rejects it (QA-021/D9)" test simulates almost exactly the scenario this session was asked to look for: an app registers with `{B1: ..., B5: ...}` while capacity is unknown (confirmed via the initial `slot_capacity`'s `null` counts and confirmed no `error` was sent for `B5` at registration), the Stream Deck plugin then reports a capacity of only one button slot, the app receives a fresh unsolicited `slot_capacity` reflecting `{buttonSlots: 1, dialSlots: 1}`, and — critically — still no `error` message ever arrives afterward for `B5`. The one gap: this test does not itself also drive a focus-gain and assert the resulting `render_update` sweep omits `B5` — that specific combination (register-while-unknown → capacity-becomes-known → focus-gain → confirm out-of-range label never rendered) isn't exercised in a single test. This is not a functional gap in the code itself: `sendContentSweepForController` derives every rendered label strictly from `positionsFor(controller)`'s actual length, so a label like `"B5"` structurally cannot appear in a sweep unless real capacity is at least 5 — the same mechanism `profileRouter.test.ts`'s existing QA-019 overflow test already proves for a known-from-the-start capacity. Still, it is a real blind spot in the sense that no single test proves this specific end-to-end path, so it is logged below as a Minor test-coverage finding rather than silently accepted as "obviously fine."
+
+QA-022's fix is precise. `LABEL_PATTERN` is now `/^([BD])([1-9]\d*)$/`, correctly rejecting `"B01"`, `"D00"`/`"D02"`, `"b1"` (case-sensitive prefix), and `"B1x"` — verified directly by re-reading the regex and cross-checking against `slotContentValidation.test.ts`'s explicit cases (`parseLabel("B01")`, `("D02")`, `("B007")` all `null`) and `validateSlotContentEntry`'s own dedicated test ("rejects a non-canonical label form regardless of whether capacity is known (QA-022)"), which explicitly exercises `"B01"` against both a known (`CAPACITY`) and unknown (`UNKNOWN_CAPACITY`) capacity and confirms rejection in both. There is only one validation function (`validateSlotContentEntry`), used for both the unknown- and known-capacity cases (the branch is internal to it, on `slots !== null`), so "both paths" are necessarily covered by the same canonical-form check running first, before any range check — confirmed by reading the function body directly: `parseLabel` is called and checked before the `slots !== null` branch is ever reached.
+
+Both workspaces' full test suites and typechecks were re-run directly in this session (not taken from the developer's report): `gatoway-core` **138/138 passing** (16 test files, up from 126 at the prior QA-020 review — consistent with the ~12 new tests this fix's `tasks.md` 11.7 added), `stream-deck-plugin` **102/102 passing** (unaffected by this fix, as expected), both `npx tsc --noEmit` clean.
+
+`gatoway-core/README.md` was independently re-read (not taken on the developer's word) and does still describe the superseded model in multiple places: it documents `register`'s content as `{ buttons: SlotContent[], dials: SlotContent[] }` (the pre-v1.7 array shape; the actual current shape is a flat label-keyed map, `RegisterContent`), describes resolution as "entirely by ordinal position" in the "Current scope and limitations" section, and links three times to `../docs/PROTOCOL.md#slot-capacity-and-ordinal-content` — `docs/PROTOCOL.md`'s actual current heading is "## Slot capacity and label-addressed content" (line 365), which generates the anchor `#slot-capacity-and-label-addressed-content`, so the README's link is a genuine dead anchor, not just stale prose. `tasks.md` confirms this is legitimately out of this fix's scope (§9.5's README task belongs to §1-9's record, before the v1.7/v1.8 reworks existed) — logged here as a non-blocking Observation for `doc-writer`, consistent with the developer's own flagged Observation and the prior session's carried-forward note.
+
+---
+
+## Issue Log
+
+| ID | Severity | Location | Description | Status |
+|----|----------|----------|-------------|--------|
+| QA-021 | Major | `gatoway-core/src/routing/profileRouter.ts`, `gatoway-core/src/protocol/messages.ts` | Registering before device capacity was known permanently rejected content, since "unknown" and "known zero" were both represented as `0`. | **Resolved** — `SlotCapacityPayload` is now genuinely `number \| null`; `getSlotCapacity()` returns `null` counts until a real `device_capacity` report arrives; range-checking is skipped (not rejected) while unknown; a broadcast now delivers fresh `slot_capacity` to every connected application plugin the first time capacity becomes known and on every subsequent `device_capacity` change. Verified directly against the code and confirmed by dedicated unit and integration tests, including a two-independent-connection broadcast test. |
+| QA-022 | Minor | `gatoway-core/src/protocol/slotContentValidation.ts:20` (`LABEL_PATTERN`) | The label-key parser accepted non-canonical numeric forms like `"B01"`, which passed validation but could never be resolved or rendered. | **Resolved** — `LABEL_PATTERN` is now `/^([BD])([1-9]\d*)$/`, rejecting leading zeros, non-positive ordinals, and lowercase prefixes; verified to reject `"B01"`, `"D00"`, `"D02"`, `"b1"`, `"B1x"` under both known and unknown capacity, confirmed by dedicated tests covering both branches of the single shared validation function. |
+| QA-023 | Minor | `gatoway-core/test/integration/focusProfileRouting.integration.test.ts` (QA-021/D9 test) | No single test drives the full sequence "register with an out-of-range label while capacity is unknown → capacity becomes known → gain focus → assert the render sweep never includes that label," even though the existing test confirms no `error` is ever sent for it. | Open |
+
+**Status values:**
+- `Open` — not yet fixed; needs architect attention
+- `Resolved` — fixed and re-confirmed
+
+---
+
+## Issue Detail
+
+### QA-023 · Minor (root-cause: code, test coverage gap) · `gatoway-core/test/integration/focusProfileRouting.integration.test.ts`
+
+**What:** The QA-021/D9 integration test ("accepts a canonically-formed but potentially out-of-range label while capacity is unknown, broadcasts fresh slot_capacity once known, and never retroactively rejects it") registers an app with `{B1, B5}` while capacity is unknown, has the Stream Deck plugin subsequently report a one-button capacity, and confirms no `error` message ever arrives for `B5` afterward. It does not, in the same test or any other, also drive a `focus` event for that connection and assert the resulting `render_update` sweep to the Stream Deck plugin omits `B5`.
+
+**Scenario:** A future change to `sendContentSweepForController`, `positionsFor`, or `labelFor` could inadvertently cause an out-of-range label accepted while capacity was unknown to actually render (e.g. if a future refactor iterated over declared content keys instead of physical positions) — and no current test in either workspace would catch that regression specifically for the "accepted-while-unknown, later-found-out-of-range" case, only for the "capacity known from the start" case (QA-019's overflow test).
+
+**Evidence:** Not a reproducible defect — this is a test-coverage gap, not a functional bug. Independent code tracing confirms the current implementation is correct: `sendContentSweepForController` (`profileRouter.ts:355-379`) iterates `positionsFor(controller)`, whose length is strictly bounded by the latest `device_capacity` report, so a label beyond that bound (like `"B5"` when only one button slot is reported) cannot structurally appear in a sweep regardless of what the connection's `content` map contains. `profileRouter.test.ts`'s existing QA-019 "overflow / multi-position mixed sweep" test proves this same mechanism for a capacity known from registration time; it does not exercise the specific known→unknown→known transition this fix introduces.
+
+**Impact:** Low — the current code is correct by inspection and by the closely-related QA-019 test using the identical rendering code path. The risk is purely that a future regression in this specific transition scenario would go undetected until live verification or a field report, rather than being caught by the automated suite.
+
+**Suggested fix direction:** Extend the existing QA-021/D9 integration test (or add a sibling one) to also send a `focus: true` from the app connection after the capacity-known broadcast, and assert the Stream Deck plugin's resulting `render_update` sweep contains no entry for the provisionally-accepted out-of-range label (mirroring the assertion style already used in QA-019's overflow test).
+
+**Root-cause level:** Code (test coverage only — no production code defect).
+
+---
+
+## Observations
+
+- `gatoway-core/README.md` still describes the model superseded by this change's v1.7/v1.8 reworks: it documents `register`'s `content` as `{ buttons: SlotContent[], dials: SlotContent[] }` (the pre-v1.7 array shape; the actual current shape is a flat label-keyed map), describes resolution as "entirely by ordinal position," and links three times to a now-dead anchor, `../docs/PROTOCOL.md#slot-capacity-and-ordinal-content` — `docs/PROTOCOL.md`'s actual current heading is "Slot capacity and label-addressed content," which generates a different anchor. Confirmed directly (not taken on the developer's word). This is legitimately out of this fix's scope per `tasks.md` (the README task belongs to the record for §1-9, before the v1.7/v1.8 reworks existed) and was flagged, not fixed, by the developer. Non-blocking; route to `doc-writer` once the change is otherwise ready to archive.
+- The previously-open Observations from the QA-020 rework session (`DIAL_COUNT_BY_DEVICE_TYPE`'s compile-time exhaustiveness being stronger than `design.md`'s stated risk; `proposal.md`'s narrative describing the superseded v1.6 story; the consolidated `openspec/specs/` files not yet reflecting this change) remain accurate and are not re-litigated here — see the prior session's entries.
+
+---
+
+## Testing Coverage Assessment
+
+Coverage for this fix is thorough for both of this session's assigned focus areas. QA-021: `slotContentValidation.test.ts` unit-tests `null`-vs-known range-skipping for both controller dimensions independently (including a mixed case, one dimension known and the other not); `messageHandler.test.ts` unit-tests provisional acceptance at the registration-handling layer; `profileRouter.test.ts` unit-tests the broadcast firing to multiple independent connections on first-known and on subsequent device-change; `focusProfileRouting.integration.test.ts` end-to-end-tests the full scenario over a real TCP connection, including confirming no `error` is ever sent for the provisionally-accepted-then-out-of-range label. QA-022: `slotContentValidation.test.ts`'s `parseLabel` describe block directly tests the non-canonical forms; `validateSlotContentEntry`'s dedicated QA-022 test explicitly exercises both the known- and unknown-capacity branches; `messageHandler.test.ts` confirms rejection surfaces via the `error` message end to end. The one gap found this session (QA-023, logged above) is that no test combines the unknown→known transition with an actual subsequent render-sweep assertion — a Minor, non-blocking gap given the render mechanism is structurally shared with the already-tested QA-019 overflow case.
+
+Full suite and typecheck re-run directly in this session (not taken from the developer's report):
+- `gatoway-core`: `npm test` → **138/138 passing**, 16 test files. `npx tsc --noEmit -p tsconfig.json` → clean.
+- `stream-deck-plugin`: `npm test` → **102/102 passing**, 15 test files. `npx tsc --noEmit -p tsconfig.json` → clean.
+
+---
+
+## Review Verdict
+
+**Recommendation:** ✅ **Pass** — QA-021 (Major, design-level) and QA-022 (Minor, code-level) are both confirmed genuinely resolved under direct code tracing, not just trust in the developer's report or the design doc's stated intent: `null`-vs-zero capacity is correctly distinguished throughout, the broadcast reaches every connected application plugin (verified with a two-connection test), no retroactive re-validation occurs anywhere in the codebase, and the canonical-label-form fix is precise and applies uniformly regardless of whether capacity is known. Both workspaces' full test suites (138/138, 102/102) and typechecks were independently re-run and are clean. One new Minor finding, QA-023, is a test-coverage gap (not a functional defect) and does not block proceeding. The README staleness Observation is confirmed real but explicitly out of this fix's scope and non-blocking — route to `doc-writer`, not back to the developer, once the change is otherwise ready to archive. This change is ready to resume `/verify`'s paused live checks (physical key press → `command` resolution, re-registration re-render, overflow rendering, profile-switch capacity transitions), and, once that passes, to proceed toward archival.
+
+---
+
+## Resumed session (2026-07-17/18) — live end-to-end with the real xDender extension
+
+**Scope:** Resumed `/verify`'s paused live checks against `extension-provided-slot-content` HEAD `8031538`, this time with the real xDender browser extension (Firefox), not the manual test client. Fresh clean rebuild of both workspaces; Firefox origin allowlist (`moz-extension://*`) configured via `allowed-origins.json` and confirmed loaded.
+
+**Live-confirmed, against real hardware and a real third-party plugin:**
+- **`device_capacity` correctly reports the device's full physical layout** (8 button positions in a 4×2 grid, 4 dial positions) derived from `Device.size`/`Device.type` — not merely what was placed — confirmed by comparing the logged payload directly against the real Stream Deck+'s known hardware shape.
+- **xDender registered successfully** with `pluginType: "xdesign"` and 8 real capabilities (Create Sketch, Circle, Fillet, Extrude, Line, Rectangle, Chamfer, Test), all validated cleanly (no rejected entries).
+- **`slot_capacity` delivered correctly** (`{buttonSlots: 8, dialSlots: 4}`) both post-registration and again on focus-gain.
+- **Full render sweep correct on focus-gain**: all 8 declared button labels rendered at their correct physical positions (matching `device_capacity`'s position-list order exactly), all 4 dials correctly left at the idle appearance (xDender declared no dial content).
+- **Idle sweep correct on blur**: all 8 button + 4 dial positions swept back to the idle appearance (`icon: null`, `label: "Gatoway"`) in one pass, no stale content left behind.
+- **Reconnection behavior confirmed twice, independently**: Gatoway core was killed (both a bare child-process kill, auto-restarted by the Stream Deck plugin's own supervisor in ~3s, and a full Stream Deck app quit/relaunch for an extended-downtime test) and xDender correctly detected the dropped WebSocket connection each time, reconnected as a genuinely new connection (fresh connection ID), sent a **complete fresh `register`** (not assuming any prior state carried over), and **explicitly re-sent `focus: true`** — exactly matching the Reconnection section's documented contract. No manual intervention or special handling was needed on either side.
+- **No warnings or errors** in Gatoway core's log from any connection or process belonging to this session (a set of stale `authentication_failed` entries in the log file are from a leftover process (`pid 45336`) predating this session's rebuild, already previously confirmed unrelated to xDender).
+
+**No new findings.** Every specific behavior this live session set out to confirm — real device-capacity reporting, real third-party registration/validation, focus-driven render/idle sweeps, and reconnection — passed cleanly against real hardware and the real xDender extension, not just the manual test client or automated suite.
+
+## Final Review Verdict
+
+**Recommendation:** ✅ **Pass.** `/verify` is complete for `extension-provided-slot-content`. All QA findings from every review round (QA-020 through QA-023) are resolved and confirmed; live verification against real hardware and a real third-party plugin (xDender) found no further issues, including a from-scratch confirmation of reconnection behavior under the new protocol. This change is ready for `doc-writer` (note the still-open, out-of-scope Observation: `gatoway-core/README.md` describes the superseded model and has a dead anchor link — sweep this up in the same pass) and then `/opsx:archive`.
+
+---

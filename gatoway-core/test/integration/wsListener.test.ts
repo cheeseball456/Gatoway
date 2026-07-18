@@ -74,7 +74,7 @@ describe("WebSocket listener (integration)", () => {
     ws.send(
       encodeMessage({
         type: "register",
-        payload: { pluginType: "xdesign", capabilities: [] },
+        payload: { pluginType: "xdesign" },
       }),
     );
     const ack = await ackPromise;

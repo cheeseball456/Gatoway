@@ -1,5 +1,5 @@
 import type { GatowayMessage } from "../protocol/envelope.js";
-import type { Capability } from "../protocol/messages.js";
+import type { RegisterContent } from "../protocol/messages.js";
 
 export type Transport = "tcp" | "websocket";
 
@@ -23,7 +23,8 @@ export interface ConnectionRecord {
   readonly connectedAt: number;
   /** Populated once a `register` message is processed. */
   pluginType?: string;
-  capabilities?: Capability[];
+  /** This connection's currently-declared content (extension-provided-slot-content design.md D3). */
+  content?: RegisterContent;
   /** Sends a message to this connection's remote peer, using its transport's framing. */
   send: (message: GatowayMessage) => void;
   /** Closes the underlying transport-level connection. */

@@ -1,27 +1,4 @@
-# message-protocol Specification
-
-## Requirements
-
-### Requirement: Unified Message Envelope
-Every message exchanged between Gatoway core and a connected plugin, regardless of
-transport, SHALL use a single JSON envelope containing a `type` field, an optional
-`connectionId` field, and a `payload` object.
-
-#### Scenario: Message parsed using the shared envelope
-- **WHEN** Gatoway core receives a message over either TCP or WebSocket
-- **THEN** it parses the message using the same envelope shape (type, optional connectionId, payload), regardless of which transport delivered it
-
-### Requirement: Transport-Specific Framing
-Gatoway core SHALL frame TCP messages as newline-delimited JSON (one JSON object per
-line) and SHALL frame WebSocket messages as one JSON object per text frame.
-
-#### Scenario: TCP message framed by newline
-- **WHEN** Gatoway core sends a message over a TCP connection
-- **THEN** the message is serialized as a single JSON object followed by a newline character, with no embedded unescaped newlines
-
-#### Scenario: WebSocket message framed as a single text frame
-- **WHEN** Gatoway core sends a message over a WebSocket connection
-- **THEN** the message is serialized as a single JSON object and sent as one WebSocket text frame
+## MODIFIED Requirements
 
 ### Requirement: Registration Message Type
 The protocol SHALL define a `register` message type that a plugin sends to
@@ -41,11 +18,12 @@ the whole registration to fail, and Gatoway core SHALL send an `error` message
 afterward identifying which entries were rejected and why. **While device capacity is
 not yet known** (see `slot_capacity`'s `null` state), a canonical key's range SHALL
 NOT be checked — only its canonical form and its value shape — since there is no
-known bound to check against yet. Sending `register` again on an already-authenticated
-connection fully replaces its previously-declared content — omitting `content` leaves
-it unchanged; an explicit `content` (including an empty map) always replaces it. This
-is the only mechanism for any content change (a live update, paging, entering or
-leaving a nested group) — no separate update message type exists.
+known bound to check against yet. Sending `register` again
+on an already-authenticated connection fully replaces its previously-declared
+content — omitting `content` leaves it unchanged; an explicit `content` (including an
+empty map) always replaces it. This is the only mechanism for any content change (a
+live update, paging, entering or leaving a nested group) — no separate update message
+type exists.
 
 #### Scenario: Plugin registers successfully
 - **WHEN** a plugin sends a `register` message containing valid authentication (token, or for WebSocket an allowlisted Origin) and declared content
@@ -79,58 +57,6 @@ leaving a nested group) — no separate update message type exists.
 - **WHEN** an already-registered connection sends `register` again with a new, explicit `content`
 - **THEN** Gatoway core replaces its stored content entirely — see `profile-routing`'s "Re-Registration While Focused Triggers Immediate Re-Render" for what happens next if that connection is currently focused
 
-### Requirement: Error Message Type
-The protocol SHALL define an `error` message type usable by either Gatoway core or a
-connected plugin to report a protocol-level error.
-
-#### Scenario: Core reports a protocol error to a plugin
-- **WHEN** Gatoway core receives a malformed message it cannot parse under the shared envelope, from a connection that is already authenticated
-- **THEN** Gatoway core sends an `error` message describing the problem back to that connection
-
-### Requirement: Focus Message Type
-The protocol SHALL define a `focus` message type that an application plugin sends to
-report its own focus state, with payload `{ focused: boolean }`.
-
-#### Scenario: Application reports focus gained
-- **WHEN** an application plugin sends a `focus` message with `payload: { focused: true }`
-- **THEN** Gatoway core treats this as that connection reporting it has gained focus
-
-#### Scenario: Application reports focus lost
-- **WHEN** an application plugin sends a `focus` message with `payload: { focused: false }`
-- **THEN** Gatoway core treats this as that connection reporting it has lost focus
-
-### Requirement: Input Event Message Type
-The protocol SHALL define an `input_event` message type that the Stream Deck plugin sends
-to report raw physical input, with payload `{ controller: "keypad" | "encoder", position,
-eventType: "keyDown" | "keyUp" | "rotate" | "push", delta? }`, where `position` is `{ row,
-column }` for `controller: "keypad"` and `{ index }` for `controller: "encoder"`, and
-`delta` is present only when `eventType` is `"rotate"`.
-
-#### Scenario: Keypad press reported
-- **WHEN** the Stream Deck plugin sends an `input_event` with `controller: "keypad"`, a `position` of `{ row, column }`, and `eventType: "keyDown"`
-- **THEN** Gatoway core receives a well-formed report of that physical key being pressed
-
-#### Scenario: Dial rotation reported
-- **WHEN** the Stream Deck plugin sends an `input_event` with `controller: "encoder"`, a `position` of `{ index }`, `eventType: "rotate"`, and a `delta` value
-- **THEN** Gatoway core receives a well-formed report of that dial being rotated by the given amount
-
-### Requirement: Render Update Message Type
-The protocol SHALL define a `render_update` message type that Gatoway core sends to the
-Stream Deck plugin to specify what to display at a given position, with payload
-`{ controller, position, icon?, label?, state? }` using the same `position` addressing as
-`input_event`. Fields other than `controller`/`position` are optional and sparse: an
-omitted field means "leave unchanged." `icon` additionally accepts `null` to mean
-"explicitly reset to the manifest's bundled default image" — distinct from omission, since
-these are indistinguishable once a field is dropped from the JSON payload entirely.
-
-#### Scenario: Render update changes a key's label
-- **WHEN** Gatoway core sends a `render_update` with a `controller`, `position`, and a `label` but no `icon` or `state`
-- **THEN** the Stream Deck plugin updates only the label at that position, leaving any existing icon/state unchanged
-
-#### Scenario: Render update explicitly resets the icon to default
-- **WHEN** Gatoway core sends a `render_update` with `icon: null`
-- **THEN** the Stream Deck plugin resets that position's displayed image to the manifest's bundled default, distinct from leaving a previously-set icon unchanged
-
 ### Requirement: Command Message Type
 The protocol SHALL define a `command` message type that Gatoway core sends to an
 application plugin once an `input_event` has been resolved against a fixed label
@@ -150,6 +76,8 @@ application plugin itself decides what a given gesture means for its own content
 #### Scenario: Resolved dial rotation sent as a command
 - **WHEN** Gatoway core resolves an `input_event` with `eventType: "rotate"` and a `delta` against an entry in the focused connection's `content` under a `D`-prefixed label
 - **THEN** Gatoway core sends that connection a `command` message with that label, `eventType: "rotate"`, and the same `delta`
+
+## ADDED Requirements
 
 ### Requirement: Device Capacity Reporting Message Type
 The protocol SHALL define a `device_capacity` message type, sent only by the
@@ -208,3 +136,13 @@ any subsequent `device_capacity` change.
 #### Scenario: All connected plugins are notified when the device itself changes
 - **WHEN** the connected Stream Deck device changes (disconnected, or replaced by a different device) while one or more application plugins are already connected
 - **THEN** Gatoway core sends each connected application plugin a fresh, unsolicited `slot_capacity` message reflecting the new counts
+
+## REMOVED Requirements
+
+### Requirement: Capability Update Message Type
+**Reason:** Superseded by re-sending `register` (see the modified Registration
+Message Type requirement above), which now fully replaces a connection's declared
+content and is the single mechanism for any content change.
+**Migration:** A plugin that previously sent `capability_update` to change one
+capability's icon/label/state now re-sends `register` with its complete, updated
+`content` — there is no partial/single-entry update message.

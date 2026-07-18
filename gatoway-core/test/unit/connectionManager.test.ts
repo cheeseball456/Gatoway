@@ -21,8 +21,8 @@ describe("ConnectionManager", () => {
     const a = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
     const b = manager.accept({ transport: "tcp", send: vi.fn(), close: vi.fn() });
 
-    manager.setPluginInfo(a.id, "lightroom", []);
-    manager.setPluginInfo(b.id, "lightroom", []);
+    manager.setPluginInfo(a.id, "lightroom", {});
+    manager.setPluginInfo(b.id, "lightroom", {});
 
     expect(a.id).not.toBe(b.id);
     expect(manager.list().map((c) => c.id).sort()).toEqual([a.id, b.id].sort());

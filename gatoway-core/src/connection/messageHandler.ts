@@ -4,15 +4,16 @@ import {
   MessageParseError,
   type GatowayMessage,
 } from "../protocol/envelope.js";
-import { validateCapability } from "../protocol/capabilityValidation.js";
+import { validateSlotContentEntry } from "../protocol/slotContentValidation.js";
 import type {
-  Capability,
-  CapabilityUpdatePayload,
+  DeviceCapacityPayload,
   ErrorPayload,
   FocusPayload,
   InputEventPayload,
   RegisterAckPayload,
+  RegisterContent,
   RegisterPayload,
+  SlotCapacityPayload,
 } from "../protocol/messages.js";
 import type { ConnectionManager } from "./connectionManager.js";
 import type { ProtocolRouter } from "./protocolRouter.js";
@@ -56,9 +57,8 @@ export function sendMessage(
 /**
  * Sends an `error` message to a connection (design.md D3): reused as-is for both
  * envelope-level malformation (invalid JSON, non-object payload - the original use) and
- * semantically-invalid-but-well-formed payload contents (rejected `register`
- * capabilities/`capability_update` fields, added by `validate-capability-payloads`) -
- * no new message type is introduced for the latter.
+ * semantically-invalid-but-well-formed payload contents (rejected `register` content
+ * entries) - no new message type is introduced for the latter.
  */
 export function sendError(
   connection: ConnectionRecord,
@@ -74,52 +74,61 @@ export function sendError(
   });
 }
 
-export interface RejectedCapability {
-  index: number;
+/** A single rejected `content` entry, reported by the label it was declared under (amended v1.7 for QA-020). */
+export interface RejectedContentEntry {
+  label: string;
   reason: string;
 }
 
-/**
- * Resolves the `capabilities` a `register` message declares (validate-capability-
- * payloads design.md D1/D2): an explicit array replaces the connection's previously-
- * declared manifest (QA-003 - omission means "unchanged", never cleared), with each
- * entry validated against the `Capability` shape independently. An entry that fails
- * validation is dropped from the returned manifest rather than failing the whole
- * registration; the caller reports dropped entries (index + reason) via a follow-up
- * `error` message.
- */
-function resolveCapabilities(
-  payload: Partial<RegisterPayload>,
-  connection: ConnectionRecord,
-): { capabilities: Capability[]; rejected: RejectedCapability[] } {
-  if (!Array.isArray(payload.capabilities)) {
-    return { capabilities: connection.capabilities ?? [], rejected: [] };
-  }
-
-  const capabilities: Capability[] = [];
-  const rejected: RejectedCapability[] = [];
-  payload.capabilities.forEach((raw, index) => {
-    const result = validateCapability(raw);
-    if (result.ok) {
-      capabilities.push(result.capability);
-    } else {
-      rejected.push({ index, reason: result.reason });
-    }
-  });
-  return { capabilities, rejected };
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Sends the follow-up `error` message identifying rejected `register` capabilities
- * (design.md D3, tasks.md 1.4): sent after `register_ack`, since the connection did
- * authenticate/register successfully regardless - the capability issue is reported
- * separately, not folded into `register_ack`'s own status field, which only concerns
- * authentication. Sends nothing when every capability was valid.
+ * Resolves the `content` a `register` message declares (extension-provided-slot-content
+ * design.md D3/D4, amended v1.7 for QA-020): an explicit `content` replaces the
+ * connection's previously-declared content in full (omission means "unchanged", never
+ * cleared), with each map entry validated independently against both its key (must be a
+ * currently-valid label for `capacity`) and its value (the `SlotContent` shape). An
+ * entry that fails either check is dropped from the map rather than failing the whole
+ * registration; the caller reports dropped entries (label + reason) via a follow-up
+ * `error` message.
  */
-function sendRejectedCapabilitiesError(
+function resolveContent(
+  payload: Partial<RegisterPayload>,
+  connection: ConnectionRecord,
+  capacity: SlotCapacityPayload,
+): { content: RegisterContent; rejected: RejectedContentEntry[] } {
+  if (!payload.content) {
+    return { content: connection.content ?? {}, rejected: [] };
+  }
+
+  const rejected: RejectedContentEntry[] = [];
+  const content: RegisterContent = {};
+  if (isPlainObject(payload.content)) {
+    for (const [label, value] of Object.entries(payload.content)) {
+      const validation = validateSlotContentEntry(label, value, capacity);
+      if (validation.ok) {
+        content[label] = validation.content;
+      } else {
+        rejected.push({ label, reason: validation.reason });
+      }
+    }
+  }
+  return { content, rejected };
+}
+
+/**
+ * Sends the follow-up `error` message identifying rejected `register` content entries
+ * (design.md D4, tasks.md 2.2/3.2): sent after `register_ack`, since the connection did
+ * authenticate/register successfully regardless - the content issue is reported
+ * separately, not folded into `register_ack`'s own status field, which only concerns
+ * authentication. Sends nothing when every entry was valid.
+ */
+function sendRejectedContentError(
   connection: ConnectionRecord,
   logger: Logger,
-  rejected: RejectedCapability[],
+  rejected: RejectedContentEntry[],
 ): void {
   if (rejected.length === 0) {
     return;
@@ -127,8 +136,8 @@ function sendRejectedCapabilitiesError(
   sendError(
     connection,
     logger,
-    "one or more declared capabilities were invalid and have been dropped from the connection's manifest",
-    { rejectedCapabilities: rejected },
+    "one or more declared content entries were invalid and have been dropped from the connection's content",
+    { rejectedContent: rejected },
   );
 }
 
@@ -154,30 +163,36 @@ function handleRegister(
 ): void {
   const payload = message.payload as Partial<RegisterPayload>;
   const pluginType = typeof payload.pluginType === "string" ? payload.pluginType : "unknown";
-  // `capabilities` omitted on a register message means "unchanged", not "cleared"
-  // (QA-003): only an explicit array replaces a previously-declared manifest. Each
-  // entry in an explicit array is validated against the `Capability` shape (design.md
-  // D1); an invalid entry is dropped rather than failing the whole registration
-  // (design.md D2), reported afterward via a follow-up `error` message.
-  const { capabilities, rejected } = resolveCapabilities(payload, connection);
+  // `content` omitted on a register message means "unchanged", not "cleared" (matching
+  // the old `capabilities` field's QA-003 rule): only an explicit `content` (including
+  // an empty map) replaces a previously-declared one. Each entry in an explicit
+  // `content` map is validated against both its key (a currently-valid label for the
+  // most recently reported device capacity - design.md D4, amended v1.7 for QA-020,
+  // further amended v1.8 for QA-021: `null` counts mean "not yet known," and range
+  // checking is skipped rather than treating that as a known-zero capacity) and its
+  // value (the `SlotContent` shape); an invalid entry is dropped rather than failing
+  // the whole registration, reported afterward via a follow-up `error` message.
+  const capacity: SlotCapacityPayload =
+    router?.getSlotCapacity() ?? { buttonSlots: null, dialSlots: null };
+  const { content, rejected } = resolveContent(payload, connection, capacity);
 
   // Already authenticated: this is the WebSocket path (auth already happened at
-  // upgrade time via the Origin allowlist) declaring its capability manifest, or a
-  // plugin re-sending `register`. Either way, no credential check is re-run here.
+  // upgrade time via the Origin allowlist) declaring its content, or a plugin
+  // re-sending `register`. Either way, no credential check is re-run here.
   if (connection.state === "authenticated") {
-    manager.setPluginInfo(connection.id, pluginType, capabilities);
+    manager.setPluginInfo(connection.id, pluginType, content);
     logger.info(
       {
         event: "registered",
         connectionId: connection.id,
         transport: connection.transport,
         pluginType,
-        capabilities,
+        content,
       },
-      "plugin registered capabilities",
+      "plugin registered content",
     );
     sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
-    sendRejectedCapabilitiesError(connection, logger, rejected);
+    sendRejectedContentError(connection, logger, rejected);
     router?.handleRegistered(connection);
     return;
   }
@@ -203,7 +218,7 @@ function handleRegister(
     return;
   }
 
-  manager.setPluginInfo(connection.id, pluginType, capabilities);
+  manager.setPluginInfo(connection.id, pluginType, content);
   manager.transition(connection.id, "authenticated");
   // QA-001: this is the first `register` message for a TCP connection (the
   // credential-validating path). It arrives while the connection is still
@@ -213,7 +228,7 @@ function handleRegister(
   // above). The equivalent WebSocket registration *does* reach that block,
   // because `preAuthenticated` connections are already `authenticated` by the
   // time their first message arrives (design.md D5). Logging `pluginType` and
-  // `capabilities` here ensures both transports produce the same registration
+  // `content` here ensures both transports produce the same registration
   // detail regardless of that authentication-timing difference.
   logger.info(
     {
@@ -221,12 +236,12 @@ function handleRegister(
       connectionId: connection.id,
       transport: connection.transport,
       pluginType,
-      capabilities,
+      content,
     },
     "authentication succeeded",
   );
   sendRegisterAck(connection, logger, { status: "ok", connectionId: connection.id });
-  sendRejectedCapabilitiesError(connection, logger, rejected);
+  sendRejectedContentError(connection, logger, rejected);
   router?.handleRegistered(connection);
 }
 
@@ -325,11 +340,12 @@ export function handleRawMessage(
     return;
   }
 
-  if (message.type === "capability_update") {
-    router?.handleCapabilityUpdate(connection, message.payload as CapabilityUpdatePayload);
+  if (message.type === "device_capacity") {
+    router?.handleDeviceCapacity(connection, message.payload as DeviceCapacityPayload);
     return;
   }
 
-  // `render_update`/`command` are core -> plugin only; nothing dispatches to Gatoway
-  // core sending them, so there's nothing to handle here even if one arrived.
+  // `render_update`/`command`/`slot_capacity` are core -> plugin only; nothing
+  // dispatches to Gatoway core sending them, so there's nothing to handle here even if
+  // one arrived.
 }

@@ -24,7 +24,7 @@ function attempt(port: number, origin: string, label: string): Promise<void> {
       ws.send(
         encodeMessage({
           type: "register",
-          payload: { pluginType: "manual-test-client", capabilities: [] },
+          payload: { pluginType: "manual-test-client" },
         }),
       );
     });

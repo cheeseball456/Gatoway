@@ -1,6 +1,4 @@
-# profile-routing Specification
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Input Event Resolution Against the Focused Connection
 Gatoway core SHALL resolve an incoming `input_event`'s physical position to its fixed
@@ -69,3 +67,13 @@ when a connection that currently has focus sends `register` again with new conte
 #### Scenario: Update while not focused produces no render
 - **WHEN** a connection that is not currently focused sends `register` again with different content
 - **THEN** Gatoway core stores the new content but sends no `render_update`, since that connection's content is not currently displayed
+
+## REMOVED Requirements
+
+### Requirement: Capability Updates Trigger an Immediate Re-Render
+**Reason:** Superseded by the modified "Re-Registration While Focused Triggers
+Immediate Re-Render" requirement above — `capability_update` no longer exists
+(message-protocol), so this requirement's own trigger no longer exists either.
+**Migration:** Any content change, live or otherwise, now happens via re-`register`;
+the re-render behavior itself is unchanged in spirit, only its trigger message
+changed.
